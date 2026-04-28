@@ -1689,13 +1689,14 @@ function initProductoAutocomplete() {
   function recalcTotal() {
     if (precioUnitario === null) return;           // sin precio fijo, no tocar
     const cant = parseInt(cantEl.value) || 1;
-    // Escribir como número entero limpio para que parsePrecio lo lea bien
-    precioEl.value = Math.round(precioUnitario * cant);
+    // El campo siempre muestra el precio UNITARIO
+    precioEl.value = Math.round(precioUnitario);
     const hint = document.getElementById('f-precio-hint');
-    if (hint && cant > 1) {
-      hint.textContent = `$${precioUnitario.toLocaleString('es-AR')} c/u × ${cant} = $${(precioUnitario * cant).toLocaleString('es-AR')}`;
-    } else if (hint) {
-      hint.textContent = precioUnitario ? `Precio unitario: $${precioUnitario.toLocaleString('es-AR')}` : '';
+    if (hint) {
+      const total = precioUnitario * cant;
+      hint.textContent = cant > 1
+        ? `$${Math.round(precioUnitario).toLocaleString('es-AR')} c/u \u00d7 ${cant} = $${Math.round(total).toLocaleString('es-AR')} total`
+        : `$${Math.round(precioUnitario).toLocaleString('es-AR')} c/u`;
     }
   }
 

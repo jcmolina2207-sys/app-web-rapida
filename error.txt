@@ -1,8 +1,15 @@
 al cargar un nuevo moviemiento como egreso, al momento de escribir en Descripcion
 si la palabra por ejemplo empieza con har que sugiera la lista de palabras con har
-que figuren en stock, por las dudas que sofia marque primero un egreso (en lugar de como stock) y que ese egreso sea un gasto de harina por ejemplo,
+que figuren en stock, por las dudas que sofia marque primero un egreso (en lugar de como stock)
+ y que ese egreso sea un gasto de harina por ejemplo,
  ya lo sugiera el box si es que se escribe esas letras (como hicimos en el nombre de los clientes)
-y que automaticamente si en la descipcion se escriba un producto del stock, que automaticamente aparezca un box nuevo para la cantidad
+y que automaticamente si en la descipcion se escriba un producto del stock, que automaticamente aparezca
+un box nuevo para la cantidad
 
-al cargar un producto en stock lo mismo que en los box de nombres y en el de descripcion de egresos, que a medida que aparezcan letras sugiera una lista 
+al cargar un producto en stock lo mismo que en los box de nombres y en el de descripcion de egresos, que a 
+medida que aparezcan letras sugiera una lista 
 de las palabras que coinciden de otro producto (ingrediente)
+
+
+---------solucionado------------- lo de arriba
+

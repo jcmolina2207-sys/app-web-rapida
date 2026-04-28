@@ -1256,7 +1256,7 @@ function renderInicio() {
   const cambioStr = cambio > 0 ? '+' + fmt(cambio) : cambio < 0 ? fmt(cambio) : '$0';
 
   el.innerHTML = `
-    <div class="dash-greeting">¡Hola! 👋</div>
+    <div class="dash-greeting">¡Hola Sofi! 👋</div>
     <div class="dash-date">${fechaLarga}</div>
     ${renderNotifBanner()}
     <div class="dash-grid">
@@ -1889,7 +1889,12 @@ function openIngredienteForm(id) {
     <div class="modal-title">${i ? 'Editar ingrediente' : 'Nuevo ingrediente'}</div>
     <div class="form-group">
       <label class="form-label">Nombre *</label>
-      <input class="form-input" id="f-nombre" type="text" placeholder="Ej: Harina 0000" value="${i?.nombre||''}">
+      <div class="cliente-wrap">
+        <input class="form-input" id="f-nombre" type="text"
+          placeholder="Ej: Harina 0000" value="${i?.nombre||''}"
+          autocomplete="off">
+        <div class="cliente-dropdown" id="ing-nombre-dropdown"></div>
+      </div>
     </div>
     <div class="flex gap-8" style="margin-bottom:14px">
       <div style="flex:1">
@@ -1912,30 +1917,61 @@ function openIngredienteForm(id) {
         <option value="paq" ${i?.unidad==='paq'?'selected':''}>paquetes</option>
       </select>
     </div>
+    ${!id ? `<div class="form-group">
+      <label class="form-label">💰 Costo de compra ($)</label>
+      <input class="form-input" id="f-costo" type="text" inputmode="decimal"
+        placeholder="Ej: 2.500"
+        style="border-color:var(--accent)">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">
+        Se registra automáticamente como egreso en Finanzas. Dejá vacío si no querés registrarlo ahora.
+      </div>
+    </div>` : ''}
     <div class="modal-actions">
       <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
       <button class="btn btn-primary w-100" onclick="saveIngrediente(${id||'null'})">💾 Guardar</button>
     </div>
   `);
+  setTimeout(() => initIngNombreAutocomplete(id), 50);
 }
 
 function saveIngrediente(id) {
   const nombre = document.getElementById('f-nombre').value.trim();
   if (!nombre) { showToast('⚠️ Ingresá un nombre'); return; }
+
+  const costoEl = document.getElementById('f-costo');
+  const costo = costoEl ? parsePrecio(costoEl.value) : 0;
+
   const data = {
     nombre,
     stock: parseFloat(document.getElementById('f-stock').value) || 0,
     ideal: parseFloat(document.getElementById('f-ideal').value) || 1,
     unidad: document.getElementById('f-unidad').value,
   };
+
   if (id) {
     const idx = state.ingredientes.findIndex(i => i.id === id);
     state.ingredientes[idx] = { ...state.ingredientes[idx], ...data };
+    saveState(); closeModal();
+    showToast('✏️ Ingrediente actualizado');
   } else {
     state.ingredientes.push({ id: nextId(), ...data });
+    // Auto-registrar egreso si se ingresó un costo
+    if (costo > 0) {
+      state.movimientos.unshift({
+        id: nextId(),
+        tipo: 'expense',
+        descripcion: `Compra de ${nombre}`,
+        monto: costo,
+        fecha: todayStr(),
+        auto: true,
+      });
+      saveState(); closeModal();
+      showToast(`🧂 Agregado · 💸 Egreso de ${fmt(costo)} registrado en Finanzas`);
+    } else {
+      saveState(); closeModal();
+      showToast('🧂 Ingrediente agregado');
+    }
   }
-  saveState(); closeModal();
-  showToast(id ? '✏️ Ingrediente actualizado' : '🧂 Ingrediente agregado');
   renderScreen(activeScreen);
 }
 
@@ -1947,6 +1983,64 @@ function confirmEliminarIngrediente(id) {
     showToast('Ingrediente eliminado');
     renderStock();
   });
+}
+
+// Autocomplete en campo "Nombre" del formulario de ingrediente
+// Sugiere ingredientes YA existentes para evitar duplicados y facilitar edición
+function initIngNombreAutocomplete(editingId) {
+  const input    = document.getElementById('f-nombre');
+  const dropdown = document.getElementById('ing-nombre-dropdown');
+  if (!input || !dropdown) return;
+
+  function normalizar(s) {
+    return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  }
+  function highlight(text, q) {
+    if (!q) return text;
+    const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
+    return text.replace(re, '<mark>$1</mark>');
+  }
+
+  function showDropdown(val) {
+    const q = normalizar(val.trim());
+    if (!q) { dropdown.classList.remove('open'); return; }
+
+    // Sugerir ingredientes existentes que coincidan (excluyendo el que se edita)
+    const matches = state.ingredientes.filter(ing =>
+      ing.id !== editingId && normalizar(ing.nombre).includes(q)
+    );
+
+    if (matches.length === 0) { dropdown.classList.remove('open'); return; }
+
+    dropdown.innerHTML = matches.map(ing => {
+      const pct = stockPct(ing);
+      const pctColor = pct >= 60 ? 'var(--green)' : pct >= 30 ? 'var(--yellow)' : 'var(--red)';
+      return `<div class="cliente-option"
+        data-nombre="${ing.nombre}" data-stock="${ing.stock}"
+        data-ideal="${ing.ideal}" data-unidad="${ing.unidad}">
+        <span class="cliente-option-name">${highlight(ing.nombre, q)}</span>
+        <span class="cliente-option-meta" style="color:${pctColor}">
+          Stock: ${ing.stock} ${ing.unidad}
+        </span>
+      </div>`;
+    }).join('');
+    dropdown.classList.add('open');
+
+    dropdown.querySelectorAll('.cliente-option').forEach(opt => {
+      opt.addEventListener('mousedown', e => {
+        e.preventDefault();
+        // Solo completa el nombre — stock, ideal y unidad los ingresa Sofi por separado
+        input.value = opt.dataset.nombre;
+        dropdown.classList.remove('open');
+        // Enfocar el campo stock para que siga completando
+        setTimeout(() => document.getElementById('f-stock')?.focus(), 50);
+      });
+    });
+  }
+
+  input.addEventListener('input', () => showDropdown(input.value));
+  input.addEventListener('focus', () => { if (input.value) showDropdown(input.value); });
+  input.addEventListener('blur', () => setTimeout(() => dropdown.classList.remove('open'), 150));
 }
 
 /* -------- FINANZAS -------- */
@@ -1999,14 +2093,28 @@ function openMovimientoForm() {
     <div class="modal-title">Nuevo movimiento</div>
     <div class="form-group">
       <label class="form-label">Tipo *</label>
-      <select class="form-input" id="f-tipo">
+      <select class="form-input" id="f-tipo" onchange="onTipoMovChange()">
         <option value="income">⬆️ Ingreso</option>
         <option value="expense">⬇️ Egreso</option>
       </select>
     </div>
     <div class="form-group">
       <label class="form-label">Descripción *</label>
-      <input class="form-input" id="f-desc" type="text" placeholder="Ej: Compra de harina">
+      <div class="cliente-wrap">
+        <input class="form-input" id="f-desc" type="text"
+          placeholder="Ej: Compra de harina"
+          autocomplete="off"
+          oninput="onDescMovInput(this.value)">
+        <div class="cliente-dropdown" id="mov-desc-dropdown"></div>
+      </div>
+    </div>
+    <div id="mov-cantidad-box" style="display:none" class="form-group">
+      <label class="form-label">🧂 Cantidad a sumar al stock (<span id="mov-ing-unidad">un</span>)</label>
+      <input class="form-input" id="f-cant-stock" type="number" min="0" step="0.1"
+        placeholder="Cuánto vas a agregar al stock...">
+      <div style="font-size:11px;color:var(--accent);margin-top:4px">
+        Si ingresás la cantidad, el stock de este ingrediente se actualizará automáticamente 🎉
+      </div>
     </div>
     <div class="form-group">
       <label class="form-label">Monto ($) *</label>
@@ -2021,12 +2129,118 @@ function openMovimientoForm() {
       <button class="btn btn-primary w-100" onclick="saveMovimiento()">💾 Guardar</button>
     </div>
   `);
+  setTimeout(() => initMovDescAutocomplete(), 50);
+}
+
+// ID del ingrediente detectado en el campo descripción
+let _movIngredienteId = null;
+
+function onTipoMovChange() {
+  // Limpiar ingrediente detectado cuando cambia el tipo
+  _movIngredienteId = null;
+  document.getElementById('mov-cantidad-box').style.display = 'none';
+  document.getElementById('mov-desc-dropdown').classList.remove('open');
+}
+
+function onDescMovInput(val) {
+  initMovDescAutocomplete._lastQuery = val;
+}
+
+function initMovDescAutocomplete() {
+  const input    = document.getElementById('f-desc');
+  const dropdown = document.getElementById('mov-desc-dropdown');
+  if (!input || !dropdown) return;
+
+  function normalizar(s) {
+    return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  }
+
+  function highlight(text, q) {
+    if (!q) return text;
+    const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
+    return text.replace(re, '<mark>$1</mark>');
+  }
+
+  function showDropdown(val) {
+    const q = normalizar(val.trim());
+    if (!q) { dropdown.classList.remove('open'); _movIngredienteId = null; hideMovCantidad(); return; }
+
+    // Buscar ingredientes que coincidan
+    const matches = state.ingredientes.filter(ing =>
+      normalizar(ing.nombre).includes(q)
+    );
+
+    if (matches.length === 0) {
+      dropdown.classList.remove('open');
+      // Si no hay coincidencia, ocultar caja de cantidad
+      _movIngredienteId = null;
+      hideMovCantidad();
+      return;
+    }
+
+    dropdown.innerHTML = matches.map(ing => {
+      const pct = stockPct(ing);
+      const pctColor = pct >= 60 ? 'var(--green)' : pct >= 30 ? 'var(--yellow)' : 'var(--red)';
+      return `<div class="cliente-option" data-id="${ing.id}" data-nombre="${ing.nombre}" data-unidad="${ing.unidad}">
+        <span class="cliente-option-name">${highlight(ing.nombre, q)}</span>
+        <span class="cliente-option-meta" style="color:${pctColor}">Stock: ${ing.stock} ${ing.unidad}</span>
+      </div>`;
+    }).join('');
+    dropdown.classList.add('open');
+
+    dropdown.querySelectorAll('.cliente-option').forEach(opt => {
+      opt.addEventListener('mousedown', e => {
+        e.preventDefault();
+        const tipo = document.getElementById('f-tipo').value;
+        input.value = opt.dataset.nombre;
+        _movIngredienteId = parseInt(opt.dataset.id);
+        dropdown.classList.remove('open');
+        // Solo mostrar caja de cantidad si es un egreso
+        if (tipo === 'expense') showMovCantidad(opt.dataset.unidad);
+        else hideMovCantidad();
+        // Enfocar el campo monto
+        setTimeout(() => document.getElementById('f-monto')?.focus(), 50);
+      });
+    });
+  }
+
+  input.addEventListener('input', () => {
+    _movIngredienteId = null;
+    hideMovCantidad();
+    showDropdown(input.value);
+  });
+  input.addEventListener('focus', () => { if (input.value) showDropdown(input.value); });
+  input.addEventListener('blur', () => setTimeout(() => dropdown.classList.remove('open'), 150));
+}
+
+function showMovCantidad(unidad) {
+  const box = document.getElementById('mov-cantidad-box');
+  const span = document.getElementById('mov-ing-unidad');
+  if (box) box.style.display = 'block';
+  if (span) span.textContent = unidad || 'un';
+}
+function hideMovCantidad() {
+  const box = document.getElementById('mov-cantidad-box');
+  if (box) box.style.display = 'none';
 }
 
 function saveMovimiento() {
   const desc = document.getElementById('f-desc').value.trim();
   const monto = parseFloat(document.getElementById('f-monto').value);
   if (!desc || !monto) { showToast('⚠️ Completá todos los campos'); return; }
+
+  // Si hay un ingrediente detectado y se ingresó cantidad, actualizar stock
+  const cantEl = document.getElementById('f-cant-stock');
+  const cant = cantEl ? parseFloat(cantEl.value) : 0;
+  let stockActualizado = false;
+  if (_movIngredienteId && cant > 0) {
+    const ing = state.ingredientes.find(x => x.id === _movIngredienteId);
+    if (ing) {
+      ing.stock = Math.round((ing.stock + cant) * 100) / 100;
+      stockActualizado = true;
+    }
+  }
+
   state.movimientos.unshift({
     id: nextId(),
     tipo: document.getElementById('f-tipo').value,
@@ -2035,8 +2249,9 @@ function saveMovimiento() {
     fecha: document.getElementById('f-fecha-mov').value || todayStr(),
     auto: false,
   });
+  _movIngredienteId = null;
   saveState(); closeModal();
-  showToast('💰 Movimiento registrado');
+  showToast(stockActualizado ? '💰 Movimiento registrado · 🧂 Stock actualizado' : '💰 Movimiento registrado');
   renderScreen(activeScreen);
 }
 

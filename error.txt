@@ -26,7 +26,20 @@ error: 1.cuando selecciono stock +ingrediente nombre no me sugiere los nombres y
 ------------------solucionado
 
 en pedidos: hay pestañas "todos" "pendiendte" "en preparacion" "entregados"
-deberia decir "todos" "pendiente " "Entregados" "Pagados" "Sin pago"
+deberia decir 
+Estado del pedido:
+
+Todos
+Pendiente
+En preparación
+Listo / Entregado
+
+Estado de pago (otro filtro aparte o badge):
+
+Pagado
+Sin pagar
+
+que sean tipo cajas donde se deslize y selecciones las opciones pendiente preparacio listo/entregado y en otro box estado de pago pagado o Sin pagar (con los colores correspondientes)
 
 finanzas: resumen financiero: "saldo" "ingresos" "egresos"
 movimientos: que aparezcan todas por orden reciente y el precio tal como esta ahora, pero en movimientos
@@ -36,4 +49,4 @@ stock: tiene que estar la parte de materia prima como ahora, pero abajo mitad de
 
 
 tanto en stock como en materia prima deberia descontarse automaticamente la cantidad de stock  a medida que se venden productos
-esto requeriria detallar todo lo usado para cada producto asi la ia lo va descontando del stock general y de cada producto 
+esto requeriria detallar todo lo usado para cada producto asi la ia lo va descontando del stock general y de cada producto (asique eso lo hacemos mas adelante)

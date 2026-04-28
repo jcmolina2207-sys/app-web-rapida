@@ -1,0 +1,56 @@
+Alfajores
+	Alfajor de maicena $
+	Alfajor de coco $
+	Alfajor de maicena c/chocolate $
+	Alfajor bon o non $	
+	Alfajor dos corazones $
+	Alfajor marplatense $
+	
+churros
+	Por unidad
+	Simple: $500
+        DDL: $700
+        Chocolate: $800
+        Chocolate + DDL: $1.100
+	
+	Por docena
+	Simple $5.500  
+	DDL $8.000
+	CH $9.500
+	CH + DDL $13.000
+Tortas
+	Bizcochuelo $
+	Lemon pie $	
+	Torta brownie $
+
+Pan
+	Biscochitos 1/4 $
+	Chipa 1/4 $
+	Chips de j/q $
+	Libritos 1/4 $
+	Trenzas 1/4 $
+
+
+
+
+Lista de precios
+Alfajor de maicena n3 X 6 unid. $2.500    241
+Alfajor de maicena con chocolate n3 X 6 unid. $3.000 
+Alfajor golosina n6 X 6 unid. $12.000 
+Alfajor marplatense simple n3 X 6 unid. $4000
+
+Torta matera de vainilla 24 cm $4.500
+Lemon pie 20 cm $14.000 
+Torta brownie 20cm $12.000
+Chipa 1/4 $3.500 
+Chips 1/4 $2.000 
+Libritos 1/4 $1.000
+Trenzas 1/4 $1.000
+
+
+Alfajor de maicenan n3 c/u $600  
+Alfajor de maicena con chocolate n3 c/u $700 
+Alfajor golosina Bon o bon n6 c/u $2.200
+Alfajor golosina Dos corazones n6 c/u $2.200
+
+

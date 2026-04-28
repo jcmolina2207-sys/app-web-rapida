@@ -1992,6 +1992,20 @@ function initIngNombreAutocomplete(editingId) {
   const dropdown = document.getElementById('ing-nombre-dropdown');
   if (!input || !dropdown) return;
 
+  // Usar position:fixed para que el dropdown no quede cortado por el overflow del modal
+  dropdown.style.position = 'fixed';
+  dropdown.style.zIndex   = '9999';
+  dropdown.style.display  = 'none';
+  dropdown.style.maxHeight = '200px';
+  dropdown.style.overflowY = 'auto';
+
+  function positionDropdown() {
+    const rect = input.getBoundingClientRect();
+    dropdown.style.left  = rect.left + 'px';
+    dropdown.style.top   = (rect.bottom + 4) + 'px';
+    dropdown.style.width = rect.width + 'px';
+  }
+
   function normalizar(s) {
     return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   }
@@ -2003,20 +2017,20 @@ function initIngNombreAutocomplete(editingId) {
 
   function showDropdown(val) {
     const q = normalizar(val.trim());
-    if (!q) { dropdown.classList.remove('open'); return; }
+    if (!q) { hideDropdown(); return; }
 
     // Sugerir ingredientes existentes que coincidan (excluyendo el que se edita)
     const matches = state.ingredientes.filter(ing =>
       ing.id !== editingId && normalizar(ing.nombre).includes(q)
     );
 
-    if (matches.length === 0) { dropdown.classList.remove('open'); return; }
+    if (matches.length === 0) { hideDropdown(); return; }
 
     dropdown.innerHTML = matches.map(ing => {
       const pct = stockPct(ing);
       const pctColor = pct >= 60 ? 'var(--green)' : pct >= 30 ? 'var(--yellow)' : 'var(--red)';
       return `<div class="cliente-option"
-        data-nombre="${ing.nombre}" data-stock="${ing.stock}"
+        data-nombre="${ing.nombre.replace(/"/g,'&quot;')}" data-stock="${ing.stock}"
         data-ideal="${ing.ideal}" data-unidad="${ing.unidad}">
         <span class="cliente-option-name">${highlight(ing.nombre, q)}</span>
         <span class="cliente-option-meta" style="color:${pctColor}">
@@ -2024,23 +2038,39 @@ function initIngNombreAutocomplete(editingId) {
         </span>
       </div>`;
     }).join('');
+
+    positionDropdown();
+    dropdown.style.display = 'block';
     dropdown.classList.add('open');
 
     dropdown.querySelectorAll('.cliente-option').forEach(opt => {
       opt.addEventListener('mousedown', e => {
         e.preventDefault();
-        // Solo completa el nombre — stock, ideal y unidad los ingresa Sofi por separado
+        // Pone el nombre exacto en el campo
         input.value = opt.dataset.nombre;
-        dropdown.classList.remove('open');
+        hideDropdown();
         // Enfocar el campo stock para que siga completando
         setTimeout(() => document.getElementById('f-stock')?.focus(), 50);
       });
     });
   }
 
+  function hideDropdown() {
+    dropdown.classList.remove('open');
+    dropdown.style.display = 'none';
+  }
+
   input.addEventListener('input', () => showDropdown(input.value));
   input.addEventListener('focus', () => { if (input.value) showDropdown(input.value); });
-  input.addEventListener('blur', () => setTimeout(() => dropdown.classList.remove('open'), 150));
+  input.addEventListener('blur', () => setTimeout(() => hideDropdown(), 180));
+
+  // Reposicionar si el modal se scrollea
+  const modalSheet = document.querySelector('.modal-sheet');
+  if (modalSheet) {
+    modalSheet.addEventListener('scroll', () => {
+      if (dropdown.style.display === 'block') positionDropdown();
+    });
+  }
 }
 
 /* -------- FINANZAS -------- */

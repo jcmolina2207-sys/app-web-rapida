@@ -13,3 +13,27 @@ de las palabras que coinciden de otro producto (ingrediente)
 
 ---------solucionado------------- lo de arriba
 
+errores:
+cuando voy a agregar ingrediente y por ejemplo escribo har, se desglosa y me sugiere los ingredientes ya cargados y al seleccionar uno de los mismos 
+automaticamente pone COMPRA DE HARINA, no quiero que aparesca asi
+tiene que aparecer el nombre del producto ejemplo Harina "olavarria" 0000, porque? porque si sofia
+quiere saber que tiene 10 kg de harina pepito y 10kg de marca acme no se mesclen, sucede lo mismo cuando voy a dar de alta un egreso en finanzas
+selecciono egreso, escribo har, me sugiere, selecciono, pero pone compra de harina, no, tiene que poner el nombre seleccionado de la harina tal como figura
+
+
+error: 1.cuando selecciono stock +ingrediente nombre no me sugiere los nombres ya guardados cuando voy escribiendo las letras, y que al seleccionarlo lo ponga tal cual en la caja de nombre
+
+------------------solucionado
+
+en pedidos: hay pestañas "todos" "pendiendte" "en preparacion" "entregados"
+deberia decir "todos" "pendiente " "Entregados" "Pagados" "Sin pago"
+
+finanzas: resumen financiero: "saldo" "ingresos" "egresos"
+movimientos: que aparezcan todas por orden reciente y el precio tal como esta ahora, pero en movimientos
+agrega la opcion de movimientos por dia (que tilde movimientos y se vean todas en orden como ahora) o que tilde la opcion por dia y le haga carteles por dia con la fecha de ingresos y egresos, y si apretas en ese dia te da el listado detallado de movimientos de ese dia tal cual como la lista de "movimientos"
+
+stock: tiene que estar la parte de materia prima como ahora, pero abajo mitad de pantalla para abajo deberia tambien estar la parte de Papeleria 
+
+
+tanto en stock como en materia prima deberia descontarse automaticamente la cantidad de stock  a medida que se venden productos
+esto requeriria detallar todo lo usado para cada producto asi la ia lo va descontando del stock general y de cada producto 

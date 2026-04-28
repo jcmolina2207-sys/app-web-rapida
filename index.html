@@ -730,6 +730,62 @@
   }
 
   /* ============================
+     PILL SELECTOR (estado / pago)
+  ============================ */
+  .pill-selector {
+    display: flex; gap: 6px; flex-wrap: wrap;
+  }
+  .pill-opt {
+    flex: 1; min-width: 80px;
+    padding: 10px 8px; border-radius: var(--radius-sm);
+    font-size: 13px; font-weight: 600;
+    border: 2px solid var(--border);
+    background: var(--surface2); color: var(--text2);
+    cursor: pointer; text-align: center;
+    transition: all var(--transition);
+  }
+  .pill-opt:active { transform: scale(.96); }
+  /* Estados pedido */
+  .pill-pending.active  { background: var(--yellow-light); border-color: var(--yellow); color: var(--yellow); }
+  .pill-prep.active     { background: var(--blue-light);   border-color: var(--blue);   color: var(--blue);   }
+  .pill-done.active     { background: var(--green-light);  border-color: var(--green);  color: var(--green);  }
+  /* Estados pago */
+  .pill-unpaid.active   { background: var(--red-light);    border-color: var(--red);    color: var(--red);    }
+  .pill-paid.active     { background: var(--green-light);  border-color: var(--green);  color: var(--green);  }
+
+  /* ============================
+     FINANZAS TOGGLE + DIA
+  ============================ */
+  .fin-toggle {
+    display: flex; gap: 4px;
+    background: var(--surface2); border-radius: 20px; padding: 3px;
+  }
+  .fin-tog-btn {
+    padding: 5px 12px; border-radius: 16px;
+    font-size: 12px; font-weight: 600;
+    border: none; background: transparent; color: var(--text2);
+    cursor: pointer; transition: all var(--transition);
+  }
+  .fin-tog-btn.active { background: var(--accent); color: #fff; }
+  .fin-dia-card {
+    background: var(--surface); border-radius: var(--radius-sm);
+    border: 1px solid var(--border); margin-bottom: 8px;
+    overflow: hidden;
+  }
+  .fin-dia-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 14px; cursor: pointer;
+    transition: background var(--transition);
+  }
+  .fin-dia-header:active { background: var(--surface2); }
+  .fin-dia-fecha { font-weight: 700; font-size: 14px; color: var(--text); }
+  .fin-dia-resumen { font-size: 12px; color: var(--text3); margin-top: 2px; display:flex; gap:6px; }
+  .fin-dia-net { font-weight: 700; font-size: 14px; }
+  .fin-dia-arrow { font-size: 12px; color: var(--text3); }
+  .fin-dia-detail { padding: 0 10px 6px; border-top: 1px solid var(--border); }
+  .fin-dia-detail .finance-item { margin-bottom: 6px; }
+
+  /* ============================
      PRODUCTO AUTOCOMPLETE
   ============================ */
   .producto-wrap { position: relative; }
@@ -906,6 +962,7 @@ const db = firebase.firestore();
 let state = {
   pedidos: [],
   ingredientes: [],
+  papeleria: [],
   movimientos: [],
   notas: [],
   nextId: 1,
@@ -958,6 +1015,7 @@ async function saveNextId(id) {
 function saveState() {
   saveCollection('pedidos', state.pedidos);
   saveCollection('ingredientes', state.ingredientes);
+  saveCollection('papeleria', state.papeleria);
   saveCollection('movimientos', state.movimientos);
   saveCollection('notas', state.notas);
   saveNextId(state.nextId);
@@ -1009,7 +1067,7 @@ async function loadFromFirebase() {
 
   // Luego intentar Firebase con timeout de 5 segundos
   const firebasePromise = (async () => {
-    const cols = ['pedidos','ingredientes','movimientos','notas'];
+    const cols = ['pedidos','ingredientes','papeleria','movimientos','notas'];
     const results = await Promise.all(
       cols.map(c => db.collection('app').doc(c).get())
     );
@@ -1042,8 +1100,7 @@ async function loadFromFirebase() {
 
 // Real-time listeners for live sync between devices
 function setupRealtimeSync() {
-  const cols = ['pedidos','ingredientes','movimientos','notas'];
-  cols.forEach(c => {
+  const cols = ['pedidos','ingredientes','papeleria','movimientos','notas'];
     db.collection('app').doc(c).onSnapshot(doc => {
       if (doc.exists) {
         state[c] = doc.data().items || [];
@@ -1517,12 +1574,21 @@ function openPedidoForm(id) {
       </div>
     </div>
     <div class="form-group">
-      <label class="form-label">Estado</label>
-      <select class="form-input" id="f-estado">
-        <option value="pending" ${(!p||p.estado==='pending')?'selected':''}>Pendiente</option>
-        <option value="prep" ${p?.estado==='prep'?'selected':''}>En preparación</option>
-        <option value="done" ${p?.estado==='done'?'selected':''}>Entregado</option>
-      </select>
+      <label class="form-label">Estado del pedido</label>
+      <div class="pill-selector" id="f-estado-selector">
+        <button type="button" class="pill-opt pill-pending ${(!p||p.estado==='pending')?'active':''}" data-val="pending" onclick="selectPill('f-estado-selector',this,'f-estado')">⏳ Pendiente</button>
+        <button type="button" class="pill-opt pill-prep ${p?.estado==='prep'?'active':''}" data-val="prep" onclick="selectPill('f-estado-selector',this,'f-estado')">🔧 Preparación</button>
+        <button type="button" class="pill-opt pill-done ${p?.estado==='done'?'active':''}" data-val="done" onclick="selectPill('f-estado-selector',this,'f-estado')">✅ Entregado</button>
+      </div>
+      <input type="hidden" id="f-estado" value="${p?.estado||'pending'}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Estado de pago</label>
+      <div class="pill-selector" id="f-pagado-selector">
+        <button type="button" class="pill-opt pill-unpaid ${!(p?.pagado)?'active':''}" data-val="0" onclick="selectPill('f-pagado-selector',this,'f-pagado')">❌ Sin pagar</button>
+        <button type="button" class="pill-opt pill-paid ${p?.pagado?'active':''}" data-val="1" onclick="selectPill('f-pagado-selector',this,'f-pagado')">💰 Pagado</button>
+      </div>
+      <input type="hidden" id="f-pagado" value="${p?.pagado?'1':'0'}">
     </div>
     <div class="form-group">
       <label class="form-label">Notas</label>
@@ -1794,7 +1860,7 @@ function savePedido(id) {
     fechaEntrega: fecha,
     hora: document.getElementById('f-hora').value || '12:00',
     estado: document.getElementById('f-estado').value,
-    pagado: id ? state.pedidos.find(p=>p.id===id)?.pagado || false : false,
+    pagado: document.getElementById('f-pagado')?.value === '1' ? true : (id ? state.pedidos.find(p=>p.id===id)?.pagado || false : false),
     notas: document.getElementById('f-notas').value.trim(),
   };
 
@@ -1818,6 +1884,8 @@ function renderStock() {
   const el = document.getElementById('screen-stock');
   const pct = globalStockPct();
   const sorted = [...state.ingredientes].sort((a, b) => stockPct(a) - stockPct(b));
+  const pap = [...(state.papeleria||[])].sort((a, b) => stockPct(a) - stockPct(b));
+  const papPct = pap.length ? Math.round(pap.reduce((s,i)=>s+stockPct(i),0)/pap.length) : 100;
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
@@ -1833,13 +1901,34 @@ function renderStock() {
         ${pct >= 60 ? '✅ Stock general en buen nivel' : pct >= 30 ? '⚠️ Algunos ingredientes bajos' : '🔴 Stock crítico — reponer urgente'}
       </div>
     </div>
-    <div class="list-2col">${sorted.map(i => ingredienteItem(i)).join('')}</div>
+    <div class="list-2col">${sorted.map(i => ingredienteItem(i, 'mat')).join('')}</div>
+
+    <div style="height:1px;background:var(--border);margin:18px 0"></div>
+
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div class="section-title" style="margin-bottom:0">📦 Papelería</div>
+      <button class="btn btn-primary btn-sm" onclick="openPapeleriaForm(null)">+ Ítem</button>
+    </div>
+    <div class="section-sub">Stock papelería: ${papPct}%</div>
+    <div class="card mb-12">
+      <div class="progress-wrap">
+        <div class="progress-bar ${stockColor(papPct)}" style="width:${papPct}%"></div>
+      </div>
+      <div class="text-sm text-muted" style="margin-top:8px">
+        ${pap.length===0 ? 'Sin ítems aún — agregá cajas, bolsas, etiquetas, etc.' : papPct >= 60 ? '✅ Papelería en buen nivel' : papPct >= 30 ? '⚠️ Algunos ítems bajos' : '🔴 Papelería crítica — reponer urgente'}
+      </div>
+    </div>
+    <div class="list-2col">${pap.map(i => ingredienteItem(i, 'pap')).join('')}</div>
   `;
 }
 
-function ingredienteItem(i) {
+function ingredienteItem(i, tipo) {
+  const isPap = tipo === 'pap';
   const pct = stockPct(i);
   const color = stockColor(pct);
+  const editFn = isPap ? `openPapeleriaForm(${i.id})` : `openIngredienteForm(${i.id})`;
+  const sumarFn = isPap ? `openSumarPapeleria(${i.id})` : `openSumarStock(${i.id})`;
+  const delFn  = isPap ? `confirmEliminarPapeleria(${i.id})` : `confirmEliminarIngrediente(${i.id})`;
   return `
     <div class="ingredient-item anim-in">
       <div class="ingredient-header">
@@ -1851,9 +1940,9 @@ function ingredienteItem(i) {
         <div class="progress-bar ${color}" style="width:${pct}%"></div>
       </div>
       <div class="ingredient-actions">
-        <button class="btn btn-secondary btn-sm" onclick="openSumarStock(${i.id})">+ Sumar</button>
-        <button class="btn btn-ghost btn-sm" onclick="openIngredienteForm(${i.id})">✏️ Editar</button>
-        <button class="btn btn-danger btn-sm" onclick="confirmEliminarIngrediente(${i.id})">🗑</button>
+        <button class="btn btn-secondary btn-sm" onclick="${sumarFn}">+ Sumar</button>
+        <button class="btn btn-ghost btn-sm" onclick="${editFn}">✏️ Editar</button>
+        <button class="btn btn-danger btn-sm" onclick="${delFn}">🗑</button>
       </div>
     </div>
   `;
@@ -1986,6 +2075,103 @@ function confirmEliminarIngrediente(id) {
   });
 }
 
+/* -------- PAPELERÍA -------- */
+function openSumarPapeleria(id) {
+  const i = state.papeleria.find(x => x.id === id);
+  openModal(`
+    <div class="modal-title">Sumar stock</div>
+    <div class="form-group">
+      <label class="form-label">${i.nombre} — Stock actual: ${i.stock} ${i.unidad}</label>
+      <input class="form-input" id="f-suma-pap" type="number" min="0" step="0.1" placeholder="Cantidad a agregar...">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="sumarPapeleria(${id})">+ Agregar</button>
+    </div>
+  `);
+}
+function sumarPapeleria(id) {
+  const v = parseFloat(document.getElementById('f-suma-pap').value);
+  if (!v || v <= 0) { showToast('⚠️ Ingresá una cantidad válida'); return; }
+  const i = state.papeleria.find(x => x.id === id);
+  i.stock = Math.round((i.stock + v) * 100) / 100;
+  saveState(); closeModal();
+  showToast('✅ Stock actualizado');
+  renderStock();
+}
+function openPapeleriaForm(id) {
+  const i = id ? state.papeleria.find(x => x.id === id) : null;
+  openModal(`
+    <div class="modal-title">${i ? 'Editar ítem' : 'Nuevo ítem de papelería'}</div>
+    <div class="form-group">
+      <label class="form-label">Nombre *</label>
+      <input class="form-input" id="f-pap-nombre" type="text" placeholder="Ej: Caja kraft 20cm" value="${i?.nombre||''}" autocomplete="off">
+    </div>
+    <div class="flex gap-8" style="margin-bottom:14px">
+      <div style="flex:1">
+        <label class="form-label">Stock actual</label>
+        <input class="form-input" id="f-pap-stock" type="number" min="0" step="1" value="${i?.stock||0}">
+      </div>
+      <div style="flex:1">
+        <label class="form-label">Stock ideal</label>
+        <input class="form-input" id="f-pap-ideal" type="number" min="0" step="1" value="${i?.ideal||10}">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Unidad</label>
+      <select class="form-input" id="f-pap-unidad">
+        <option value="un" ${(!i||i.unidad==='un')?'selected':''}>unidades</option>
+        <option value="paq" ${i?.unidad==='paq'?'selected':''}>paquetes</option>
+        <option value="m" ${i?.unidad==='m'?'selected':''}>metros</option>
+        <option value="kg" ${i?.unidad==='kg'?'selected':''}>kg</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="savePapeleria(${id||'null'})">💾 Guardar</button>
+    </div>
+  `);
+}
+function savePapeleria(id) {
+  const nombre = document.getElementById('f-pap-nombre').value.trim();
+  if (!nombre) { showToast('⚠️ Ingresá un nombre'); return; }
+  const data = {
+    nombre,
+    stock: parseFloat(document.getElementById('f-pap-stock').value) || 0,
+    ideal: parseFloat(document.getElementById('f-pap-ideal').value) || 10,
+    unidad: document.getElementById('f-pap-unidad').value,
+  };
+  if (id) {
+    const idx = state.papeleria.findIndex(i => i.id === id);
+    state.papeleria[idx] = { ...state.papeleria[idx], ...data };
+    saveState(); closeModal();
+    showToast('✏️ Ítem actualizado');
+  } else {
+    state.papeleria.push({ id: nextId(), ...data });
+    saveState(); closeModal();
+    showToast('📦 Ítem de papelería agregado');
+  }
+  renderStock();
+}
+function confirmEliminarPapeleria(id) {
+  const i = state.papeleria.find(x => x.id === id);
+  showConfirm('¿Eliminar ítem?', `Se eliminará "${i.nombre}" de papelería.`, () => {
+    state.papeleria = state.papeleria.filter(x => x.id !== id);
+    saveState();
+    showToast('Ítem eliminado');
+    renderStock();
+  });
+}
+
+/* -------- PILL SELECTOR HELPER -------- */
+function selectPill(selectorId, btn, hiddenId) {
+  const wrap = document.getElementById(selectorId);
+  if (wrap) wrap.querySelectorAll('.pill-opt').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const hidden = document.getElementById(hiddenId);
+  if (hidden) hidden.value = btn.dataset.val;
+}
+
 // Autocomplete en campo "Nombre" del formulario de ingrediente
 // Sugiere ingredientes YA existentes para evitar duplicados y facilitar edición
 function initIngNombreAutocomplete(editingId) {
@@ -2075,6 +2261,8 @@ function initIngNombreAutocomplete(editingId) {
 }
 
 /* -------- FINANZAS -------- */
+let _finVista = 'lista'; // 'lista' | 'dia'
+
 function renderFinanzas() {
   const el = document.getElementById('screen-finanzas');
   const saldo = totalSaldo();
@@ -2099,12 +2287,73 @@ function renderFinanzas() {
         <div class="amount">${fmt(egresos)}</div>
       </div>
     </div>
-    <div class="section-title" style="font-size:16px;margin-bottom:12px">Movimientos</div>
-    ${movs.length === 0 ? `<div class="empty-state"><div class="empty-icon">💸</div><p>Sin movimientos aún</p></div>` :
-      movs.map(m => finanzaItem(m)).join('')
-    }
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div class="section-title" style="font-size:16px;margin-bottom:0">Movimientos</div>
+      <div class="fin-toggle">
+        <button class="fin-tog-btn ${_finVista==='lista'?'active':''}" onclick="setFinVista('lista')">📋 Lista</button>
+        <button class="fin-tog-btn ${_finVista==='dia'?'active':''}" onclick="setFinVista('dia')">📅 Por día</button>
+      </div>
+    </div>
+    <div id="fin-movs-content">
+      ${movs.length === 0 ? `<div class="empty-state"><div class="empty-icon">💸</div><p>Sin movimientos aún</p></div>` :
+        _finVista === 'lista'
+          ? movs.map(m => finanzaItem(m)).join('')
+          : renderMovsPorDia(movs)
+      }
+    </div>
   `;
 }
+
+function setFinVista(v) {
+  _finVista = v;
+  renderFinanzas();
+}
+
+function renderMovsPorDia(movs) {
+  // Agrupar por fecha
+  const grupos = {};
+  movs.forEach(m => {
+    if (!grupos[m.fecha]) grupos[m.fecha] = [];
+    grupos[m.fecha].push(m);
+  });
+  const fechas = Object.keys(grupos).sort((a,b) => b.localeCompare(a));
+  return fechas.map(fecha => {
+    const items = grupos[fecha];
+    const ing = items.filter(m=>m.tipo==='income').reduce((s,m)=>s+m.monto,0);
+    const egr = items.filter(m=>m.tipo==='expense').reduce((s,m)=>s+m.monto,0);
+    const net = ing - egr;
+    return `
+      <div class="fin-dia-card" onclick="toggleFinDia('${fecha}')">
+        <div class="fin-dia-header">
+          <div>
+            <div class="fin-dia-fecha">${fmtDate(fecha)}</div>
+            <div class="fin-dia-resumen">
+              ${ing>0?`<span style="color:var(--green);font-size:12px">+${fmt(ing)}</span>`:''}
+              ${egr>0?`<span style="color:var(--red);font-size:12px"> -${fmt(egr)}</span>`:''}
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="fin-dia-net" style="color:${net>=0?'var(--green)':'var(--red)'}">${net>=0?'+':''}${fmt(net)}</span>
+            <span class="fin-dia-arrow" id="arr-${fecha}">▼</span>
+          </div>
+        </div>
+        <div class="fin-dia-detail" id="det-${fecha}" style="display:none">
+          ${items.map(m => finanzaItem(m)).join('')}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function toggleFinDia(fecha) {
+  const det = document.getElementById('det-' + fecha);
+  const arr = document.getElementById('arr-' + fecha);
+  if (!det) return;
+  const open = det.style.display !== 'none';
+  det.style.display = open ? 'none' : 'block';
+  if (arr) arr.textContent = open ? '▼' : '▲';
+}
+
 
 function finanzaItem(m) {
   return `

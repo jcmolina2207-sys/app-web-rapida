@@ -906,6 +906,7 @@ const db = firebase.firestore();
 let state = {
   pedidos: [],
   ingredientes: [],
+  papeleria: [],
   movimientos: [],
   notas: [],
   nextId: 1,
@@ -958,6 +959,7 @@ async function saveNextId(id) {
 function saveState() {
   saveCollection('pedidos', state.pedidos);
   saveCollection('ingredientes', state.ingredientes);
+  saveCollection('papeleria', state.papeleria);
   saveCollection('movimientos', state.movimientos);
   saveCollection('notas', state.notas);
   saveNextId(state.nextId);
@@ -1009,7 +1011,7 @@ async function loadFromFirebase() {
 
   // Luego intentar Firebase con timeout de 5 segundos
   const firebasePromise = (async () => {
-    const cols = ['pedidos','ingredientes','movimientos','notas'];
+    const cols = ['pedidos','ingredientes','papeleria','movimientos','notas'];
     const results = await Promise.all(
       cols.map(c => db.collection('app').doc(c).get())
     );
@@ -1321,36 +1323,79 @@ function renderInicio() {
 }
 
 /* -------- PEDIDOS -------- */
-let pedidoFiltro = 'all';
+let pedidoFiltroEstado = 'all';
+let pedidoFiltroPago = 'all';
+
 function renderPedidos() {
   const el = document.getElementById('screen-pedidos');
-  const filtros = [
-    { key: 'all', label: 'Todos' },
-    { key: 'pending', label: '⏳ Pendiente' },
-    { key: 'prep', label: '🔵 En preparación' },
-    { key: 'done', label: '✅ Entregados' },
-  ];
-  const filtrados = pedidoFiltro === 'all' ? state.pedidos : state.pedidos.filter(p => p.estado === pedidoFiltro);
-  // sort: pending/prep first, by date
+
+  let filtrados = state.pedidos;
+  if (pedidoFiltroEstado !== 'all') filtrados = filtrados.filter(p => p.estado === pedidoFiltroEstado);
+  if (pedidoFiltroPago !== 'all') filtrados = filtrados.filter(p => pedidoFiltroPago === 'paid' ? p.pagado : !p.pagado);
+
   const sorted = [...filtrados].sort((a, b) => {
     if (a.estado === 'done' && b.estado !== 'done') return 1;
     if (b.estado === 'done' && a.estado !== 'done') return -1;
     return (a.fechaEntrega + a.hora).localeCompare(b.fechaEntrega + b.hora);
   });
 
+  const estadoFiltros = [
+    { key: 'all',     label: 'Todos',             color: 'var(--accent)',  bg: 'var(--accent-light)' },
+    { key: 'pending', label: 'Pendiente',          color: 'var(--yellow)',  bg: 'var(--yellow-light)' },
+    { key: 'prep',    label: 'En preparación',     color: 'var(--blue)',    bg: 'var(--blue-light)' },
+    { key: 'done',    label: 'Listo / Entregado',  color: 'var(--green)',   bg: 'var(--green-light)' },
+  ];
+  const pagoFiltros = [
+    { key: 'all',    label: 'Todos',    color: 'var(--accent)', bg: 'var(--accent-light)' },
+    { key: 'paid',   label: '✓ Pagado', color: 'var(--green)',  bg: 'var(--green-light)' },
+    { key: 'unpaid', label: 'Sin pagar',color: 'var(--red)',    bg: 'var(--red-light)' },
+  ];
+
+  function chipEstado(f) {
+    const active = pedidoFiltroEstado === f.key;
+    return `<div onclick="setPedidoFiltroEstado('${f.key}')"
+      style="display:inline-flex;align-items:center;padding:8px 16px;border-radius:20px;
+        font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:all .2s;flex-shrink:0;
+        border:2px solid ${active ? f.color : 'var(--border)'};
+        background:${active ? f.bg : 'var(--surface)'};
+        color:${active ? f.color : 'var(--text2)'};">${f.label}</div>`;
+  }
+  function chipPago(f) {
+    const active = pedidoFiltroPago === f.key;
+    return `<div onclick="setPedidoFiltroPago('${f.key}')"
+      style="display:inline-flex;align-items:center;padding:8px 16px;border-radius:20px;
+        font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:all .2s;flex-shrink:0;
+        border:2px solid ${active ? f.color : 'var(--border)'};
+        background:${active ? f.bg : 'var(--surface)'};
+        color:${active ? f.color : 'var(--text2)'};">${f.label}</div>`;
+  }
+
   el.innerHTML = `
     <div class="section-title">Pedidos</div>
     <div class="section-sub">${state.pedidos.length} pedidos en total</div>
-    <div class="filter-row">
-      ${filtros.map(f => `<div class="filter-chip ${pedidoFiltro===f.key?'active':''}" onclick="setPedidoFiltro('${f.key}')">${f.label}</div>`).join('')}
+
+    <div style="margin-bottom:8px">
+      <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Estado del pedido</div>
+      <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none">
+        ${estadoFiltros.map(f => chipEstado(f)).join('')}
+      </div>
     </div>
+    <div style="margin-bottom:14px">
+      <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Estado de pago</div>
+      <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none">
+        ${pagoFiltros.map(f => chipPago(f)).join('')}
+      </div>
+    </div>
+
     ${sorted.length === 0 ? `<div class="empty-state"><div class="empty-icon">📦</div><p>Sin pedidos en esta categoría</p></div>` :
       `<div class="list-2col">${sorted.map(p => pedidoCard(p)).join('')}</div>`
     }
     <div style="height:8px"></div>
   `;
 }
-function setPedidoFiltro(f) { pedidoFiltro = f; renderPedidos(); }
+function setPedidoFiltroEstado(f) { pedidoFiltroEstado = f; renderPedidos(); }
+function setPedidoFiltroPago(f) { pedidoFiltroPago = f; renderPedidos(); }
+function setPedidoFiltro(f) { pedidoFiltroEstado = f; renderPedidos(); }
 
 function pedidoCard(p) {
   return `
@@ -1818,6 +1863,15 @@ function renderStock() {
   const el = document.getElementById('screen-stock');
   const pct = globalStockPct();
   const sorted = [...state.ingredientes].sort((a, b) => stockPct(a) - stockPct(b));
+  const sortedPap = [...state.papeleria].sort((a, b) => stockPct(a) - stockPct(b));
+
+  // Papelería pct global
+  function papPct() {
+    if (!state.papeleria.length) return 100;
+    const total = state.papeleria.reduce((s, i) => s + stockPct(i), 0);
+    return Math.round(total / state.papeleria.length);
+  }
+  const pap = papPct();
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
@@ -1833,13 +1887,37 @@ function renderStock() {
         ${pct >= 60 ? '✅ Stock general en buen nivel' : pct >= 30 ? '⚠️ Algunos ingredientes bajos' : '🔴 Stock crítico — reponer urgente'}
       </div>
     </div>
-    <div class="list-2col">${sorted.map(i => ingredienteItem(i)).join('')}</div>
+    ${sorted.length === 0
+      ? `<div class="empty-state" style="padding:20px 0"><div class="empty-icon">🧂</div><p>Sin ingredientes. Tocá + para agregar.</p></div>`
+      : `<div class="list-2col">${sorted.map(i => ingredienteItem(i, 'mp')).join('')}</div>`}
+
+    <div style="height:16px"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div class="section-title" style="margin-bottom:0">📋 Papelería</div>
+      <button class="btn btn-primary btn-sm" onclick="openPapeleriaForm(null)">+ Artículo</button>
+    </div>
+    <div class="section-sub">Stock de papelería: ${pap}%</div>
+    <div class="card mb-12">
+      <div class="progress-wrap">
+        <div class="progress-bar ${stockColor(pap)}" style="width:${pap}%"></div>
+      </div>
+      <div class="text-sm text-muted" style="margin-top:8px">
+        ${pap >= 60 ? '✅ Papelería en buen nivel' : pap >= 30 ? '⚠️ Algunos artículos bajos' : '🔴 Papelería baja — reponer urgente'}
+      </div>
+    </div>
+    ${sortedPap.length === 0
+      ? `<div class="empty-state" style="padding:20px 0"><div class="empty-icon">📋</div><p>Sin artículos de papelería. Tocá + para agregar.</p></div>`
+      : `<div class="list-2col">${sortedPap.map(i => ingredienteItem(i, 'pap')).join('')}</div>`}
   `;
 }
 
-function ingredienteItem(i) {
+function ingredienteItem(i, tipo) {
   const pct = stockPct(i);
   const color = stockColor(pct);
+  const isPap = tipo === 'pap';
+  const editFn = isPap ? `openPapeleriaForm(${i.id})` : `openIngredienteForm(${i.id})`;
+  const sumFn  = isPap ? `openSumarPapeleria(${i.id})` : `openSumarStock(${i.id})`;
+  const delFn  = isPap ? `confirmEliminarPapeleria(${i.id})` : `confirmEliminarIngrediente(${i.id})`;
   return `
     <div class="ingredient-item anim-in">
       <div class="ingredient-header">
@@ -1851,9 +1929,9 @@ function ingredienteItem(i) {
         <div class="progress-bar ${color}" style="width:${pct}%"></div>
       </div>
       <div class="ingredient-actions">
-        <button class="btn btn-secondary btn-sm" onclick="openSumarStock(${i.id})">+ Sumar</button>
-        <button class="btn btn-ghost btn-sm" onclick="openIngredienteForm(${i.id})">✏️ Editar</button>
-        <button class="btn btn-danger btn-sm" onclick="confirmEliminarIngrediente(${i.id})">🗑</button>
+        <button class="btn btn-secondary btn-sm" onclick="${sumFn}">+ Sumar</button>
+        <button class="btn btn-ghost btn-sm" onclick="${editFn}">✏️ Editar</button>
+        <button class="btn btn-danger btn-sm" onclick="${delFn}">🗑</button>
       </div>
     </div>
   `;
@@ -1988,6 +2066,124 @@ function confirmEliminarIngrediente(id) {
 
 // Autocomplete en campo "Nombre" del formulario de ingrediente
 // Sugiere ingredientes YA existentes para evitar duplicados y facilitar edición
+
+/* -------- PAPELERÍA -------- */
+function openSumarPapeleria(id) {
+  const i = state.papeleria.find(x => x.id === id);
+  openModal(`
+    <div class="modal-title">Sumar stock — Papelería</div>
+    <div class="form-group">
+      <label class="form-label">${i.nombre} — Stock actual: ${i.stock} ${i.unidad}</label>
+      <input class="form-input" id="f-suma-pap" type="number" min="0" step="1" placeholder="Cantidad a agregar...">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="sumarPapeleria(${id})">+ Agregar</button>
+    </div>
+  `);
+}
+
+function sumarPapeleria(id) {
+  const v = parseFloat(document.getElementById('f-suma-pap').value);
+  if (!v || v <= 0) { showToast('⚠️ Ingresá una cantidad válida'); return; }
+  const i = state.papeleria.find(x => x.id === id);
+  i.stock = Math.round((i.stock + v) * 100) / 100;
+  saveState(); closeModal();
+  showToast('✅ Papelería actualizada');
+  renderStock();
+}
+
+function openPapeleriaForm(id) {
+  const i = id ? state.papeleria.find(x => x.id === id) : null;
+  openModal(`
+    <div class="modal-title">${i ? 'Editar artículo' : 'Nuevo artículo de papelería'}</div>
+    <div class="form-group">
+      <label class="form-label">Nombre *</label>
+      <input class="form-input" id="f-pap-nombre" type="text"
+        placeholder="Ej: Cajas medianas, Stickers, Bolsas" value="${i?.nombre||''}">
+    </div>
+    <div class="flex gap-8" style="margin-bottom:14px">
+      <div style="flex:1">
+        <label class="form-label">Stock actual</label>
+        <input class="form-input" id="f-pap-stock" type="number" min="0" step="1" value="${i?.stock||0}">
+      </div>
+      <div style="flex:1">
+        <label class="form-label">Stock ideal</label>
+        <input class="form-input" id="f-pap-ideal" type="number" min="1" step="1" value="${i?.ideal||10}">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Unidad</label>
+      <select class="form-input" id="f-pap-unidad">
+        <option value="un" ${(!i||i.unidad==='un')?'selected':''}>unidades</option>
+        <option value="paq" ${i?.unidad==='paq'?'selected':''}>paquetes</option>
+        <option value="rollos" ${i?.unidad==='rollos'?'selected':''}>rollos</option>
+        <option value="metros" ${i?.unidad==='metros'?'selected':''}>metros</option>
+        <option value="hojas" ${i?.unidad==='hojas'?'selected':''}>hojas</option>
+      </select>
+    </div>
+    ${!id ? `<div class="form-group">
+      <label class="form-label">💰 Costo de compra ($)</label>
+      <input class="form-input" id="f-pap-costo" type="text" inputmode="decimal"
+        placeholder="Ej: 1.500">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">
+        Se registra automáticamente como egreso en Finanzas.
+      </div>
+    </div>` : ''}
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="savePapeleria(${id||'null'})">💾 Guardar</button>
+    </div>
+  `);
+}
+
+function savePapeleria(id) {
+  const nombre = document.getElementById('f-pap-nombre').value.trim();
+  if (!nombre) { showToast('⚠️ Ingresá un nombre'); return; }
+
+  const costoEl = document.getElementById('f-pap-costo');
+  const costo = costoEl ? parsePrecio(costoEl.value) : 0;
+
+  const data = {
+    nombre,
+    stock: parseFloat(document.getElementById('f-pap-stock').value) || 0,
+    ideal: parseFloat(document.getElementById('f-pap-ideal').value) || 10,
+    unidad: document.getElementById('f-pap-unidad').value,
+  };
+
+  if (id) {
+    const idx = state.papeleria.findIndex(i => i.id === id);
+    state.papeleria[idx] = { ...state.papeleria[idx], ...data };
+    saveState(); closeModal();
+    showToast('✏️ Artículo actualizado');
+  } else {
+    state.papeleria.push({ id: nextId(), ...data });
+    if (costo > 0) {
+      state.movimientos.unshift({
+        id: nextId(), tipo: 'expense',
+        descripcion: `Compra de ${nombre} (papelería)`,
+        monto: costo, fecha: todayStr(), auto: true,
+      });
+      saveState(); closeModal();
+      showToast(`📋 Agregado · 💸 Egreso de ${fmt(costo)} registrado`);
+    } else {
+      saveState(); closeModal();
+      showToast('📋 Artículo de papelería agregado');
+    }
+  }
+  renderScreen(activeScreen);
+}
+
+function confirmEliminarPapeleria(id) {
+  const i = state.papeleria.find(x => x.id === id);
+  showConfirm('¿Eliminar artículo?', `Se eliminará "${i.nombre}" de papelería.`, () => {
+    state.papeleria = state.papeleria.filter(x => x.id !== id);
+    saveState();
+    showToast('Artículo eliminado');
+    renderStock();
+  });
+}
+
 function initIngNombreAutocomplete(editingId) {
   const input    = document.getElementById('f-nombre');
   const dropdown = document.getElementById('ing-nombre-dropdown');
@@ -2075,12 +2271,58 @@ function initIngNombreAutocomplete(editingId) {
 }
 
 /* -------- FINANZAS -------- */
+let finanzasVistaDia = false;
+let finanzasDiaExpandido = null;
+
 function renderFinanzas() {
   const el = document.getElementById('screen-finanzas');
   const saldo = totalSaldo();
   const ingresos = totalIngresos();
   const egresos = totalEgresos();
   const movs = [...state.movimientos].sort((a,b) => b.fecha.localeCompare(a.fecha));
+
+  // Construir vista por día
+  function renderMovsPorDia() {
+    if (movs.length === 0) return `<div class="empty-state"><div class="empty-icon">💸</div><p>Sin movimientos aún</p></div>`;
+    // Agrupar por fecha
+    const grupos = {};
+    movs.forEach(m => {
+      if (!grupos[m.fecha]) grupos[m.fecha] = [];
+      grupos[m.fecha].push(m);
+    });
+    const fechas = Object.keys(grupos).sort((a,b) => b.localeCompare(a));
+    return fechas.map(fecha => {
+      const items = grupos[fecha];
+      const ingDia = items.filter(m=>m.tipo==='income').reduce((s,m)=>s+m.monto,0);
+      const egDia  = items.filter(m=>m.tipo==='expense').reduce((s,m)=>s+m.monto,0);
+      const saldoDia = ingDia - egDia;
+      const expandido = finanzasDiaExpandido === fecha;
+      return `
+        <div style="margin-bottom:10px">
+          <div onclick="toggleDiaFinanza('${fecha}')"
+            style="background:var(--surface);border-radius:var(--radius-sm);
+              padding:12px 16px;border:1px solid var(--border);cursor:pointer;
+              display:flex;align-items:center;justify-content:space-between;
+              box-shadow:var(--shadow);transition:background .15s"
+            onmouseover="this.style.background='var(--surface2)'"
+            onmouseout="this.style.background='var(--surface)'">
+            <div>
+              <div style="font-weight:700;font-size:14px;color:var(--text)">${fmtDate(fecha)}</div>
+              <div style="font-size:11px;color:var(--text3);margin-top:2px">
+                ${items.length} movimiento${items.length!==1?'s':''}
+                · <span style="color:var(--green)">+${fmt(ingDia)}</span>
+                · <span style="color:var(--red)">-${fmt(egDia)}</span>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-weight:700;font-size:15px;color:${saldoDia>=0?'var(--green)':'var(--red)'}">${saldoDia>=0?'+':''}${fmt(saldoDia)}</span>
+              <span style="color:var(--text3);font-size:18px;transition:transform .2s;${expandido?'transform:rotate(90deg)':''}">›</span>
+            </div>
+          </div>
+          ${expandido ? `<div style="padding:8px 4px 0">${items.map(m => finanzaItem(m)).join('')}</div>` : ''}
+        </div>`;
+    }).join('');
+  }
 
   el.innerHTML = `
     <div class="section-title">Finanzas</div>
@@ -2099,11 +2341,35 @@ function renderFinanzas() {
         <div class="amount">${fmt(egresos)}</div>
       </div>
     </div>
-    <div class="section-title" style="font-size:16px;margin-bottom:12px">Movimientos</div>
-    ${movs.length === 0 ? `<div class="empty-state"><div class="empty-icon">💸</div><p>Sin movimientos aún</p></div>` :
-      movs.map(m => finanzaItem(m)).join('')
+
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div class="section-title" style="font-size:16px;margin-bottom:0">Movimientos</div>
+      <div style="display:flex;gap:6px">
+        <div onclick="setFinanzasVista(false)"
+          style="padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;
+            border:2px solid ${!finanzasVistaDia?'var(--accent)':'var(--border)'};
+            background:${!finanzasVistaDia?'var(--accent-light)':'var(--surface)'};
+            color:${!finanzasVistaDia?'var(--accent)':'var(--text2)'}">Lista</div>
+        <div onclick="setFinanzasVista(true)"
+          style="padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;
+            border:2px solid ${finanzasVistaDia?'var(--accent)':'var(--border)'};
+            background:${finanzasVistaDia?'var(--accent-light)':'var(--surface)'};
+            color:${finanzasVistaDia?'var(--accent)':'var(--text2)'}">Por día</div>
+      </div>
+    </div>
+
+    ${movs.length === 0
+      ? `<div class="empty-state"><div class="empty-icon">💸</div><p>Sin movimientos aún</p></div>`
+      : finanzasVistaDia
+        ? renderMovsPorDia()
+        : movs.map(m => finanzaItem(m)).join('')
     }
   `;
+}
+function setFinanzasVista(porDia) { finanzasVistaDia = porDia; finanzasDiaExpandido = null; renderFinanzas(); }
+function toggleDiaFinanza(fecha) {
+  finanzasDiaExpandido = finanzasDiaExpandido === fecha ? null : fecha;
+  renderFinanzas();
 }
 
 function finanzaItem(m) {

@@ -2374,15 +2374,82 @@ function toggleDiaFinanza(fecha) {
 
 function finanzaItem(m) {
   return `
-    <div class="finance-item anim-in">
+    <div class="finance-item anim-in" style="cursor:pointer" onclick="openEditMovimiento(${m.id})">
       <div class="finance-dot ${m.tipo}">${m.tipo==='income'?'⬆️':'⬇️'}</div>
       <div class="finance-info">
         <div class="finance-desc">${m.descripcion}${m.auto?' 🔄':''}</div>
         <div class="finance-date">${fmtDate(m.fecha)}</div>
       </div>
-      <div class="finance-amount ${m.tipo}">${m.tipo==='income'?'+':'-'}${fmt(m.monto)}</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="finance-amount ${m.tipo}">${m.tipo==='income'?'+':'-'}${fmt(m.monto)}</div>
+        <button class="btn btn-ghost btn-sm" style="padding:4px 8px;font-size:13px" onclick="event.stopPropagation();openEditMovimiento(${m.id})">✏️</button>
+      </div>
     </div>
   `;
+}
+
+function openEditMovimiento(id) {
+  const m = state.movimientos.find(x => x.id === id);
+  if (!m) return;
+  openModal(`
+    <div class="modal-title">Editar movimiento</div>
+    <div class="form-group">
+      <label class="form-label">Tipo *</label>
+      <select class="form-input" id="f-edit-tipo">
+        <option value="income" ${m.tipo==='income'?'selected':''}>⬆️ Ingreso</option>
+        <option value="expense" ${m.tipo==='expense'?'selected':''}>⬇️ Egreso</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Descripción *</label>
+      <input class="form-input" id="f-edit-desc" type="text" value="${m.descripcion.replace(/"/g,'&quot;')}" placeholder="Ej: Compra de harina">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Monto ($) *</label>
+      <input class="form-input" id="f-edit-monto" type="number" min="0" value="${m.monto}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Fecha</label>
+      <input class="form-input" id="f-edit-fecha" type="date" value="${m.fecha}">
+    </div>
+    ${m.auto ? `<div style="font-size:11px;color:var(--text3);margin-bottom:14px;padding:8px 12px;background:var(--surface2);border-radius:var(--radius-sm);border:1px solid var(--border)">🔄 Este movimiento fue generado automáticamente. Podés editarlo igual.</div>` : ''}
+    <div class="modal-actions" style="flex-direction:column;gap:8px">
+      <div style="display:flex;gap:8px;width:100%">
+        <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+        <button class="btn btn-primary w-100" onclick="saveEditMovimiento(${id})">💾 Guardar</button>
+      </div>
+      <button class="btn btn-danger w-100" onclick="confirmEliminarMovimiento(${id})">🗑 Eliminar movimiento</button>
+    </div>
+  `);
+}
+
+function saveEditMovimiento(id) {
+  const idx = state.movimientos.findIndex(x => x.id === id);
+  if (idx === -1) return;
+  const desc = document.getElementById('f-edit-desc').value.trim();
+  const monto = parseFloat(document.getElementById('f-edit-monto').value);
+  if (!desc) { showToast('⚠️ Ingresá una descripción'); return; }
+  if (!monto || monto <= 0) { showToast('⚠️ Ingresá un monto válido'); return; }
+  state.movimientos[idx] = {
+    ...state.movimientos[idx],
+    tipo: document.getElementById('f-edit-tipo').value,
+    descripcion: desc,
+    monto,
+    fecha: document.getElementById('f-edit-fecha').value || todayStr(),
+  };
+  saveState(); closeModal();
+  showToast('✏️ Movimiento actualizado');
+  renderScreen(activeScreen);
+}
+
+function confirmEliminarMovimiento(id) {
+  const m = state.movimientos.find(x => x.id === id);
+  showConfirm('¿Eliminar movimiento?', `Se eliminará "${m.descripcion}" de forma permanente.`, () => {
+    state.movimientos = state.movimientos.filter(x => x.id !== id);
+    saveState(); closeModal();
+    showToast('🗑 Movimiento eliminado');
+    renderScreen(activeScreen);
+  });
 }
 
 function openMovimientoForm() {

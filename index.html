@@ -773,8 +773,44 @@
   .prod-option mark {
     background: #bfdbfe; color: var(--text); border-radius: 2px; padding: 0 2px;
   }
+  /* ============================
+     RECETAS
+  ============================ */
+  .receta-card {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 14px;
+    margin-bottom: 10px;
+  }
+  .receta-card-header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 8px; margin-bottom: 8px;
+  }
+  .receta-card-nombre {
+    font-size: 14px; font-weight: 700; color: var(--text);
+    flex: 1;
+  }
+  .receta-card-rinde {
+    font-size: 12px; color: var(--text3); white-space: nowrap;
+  }
+  .receta-ing-list {
+    list-style: none; padding: 0; margin: 0 0 10px;
+  }
+  .receta-ing-list li {
+    font-size: 13px; color: var(--text2);
+    padding: 3px 0;
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between;
+  }
+  .receta-ing-list li:last-child { border-bottom: none; }
+  .receta-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .receta-warn {
+    font-size:12px; color:var(--yellow);
+    background:var(--yellow-light); border-radius:6px;
+    padding: 6px 10px; margin-bottom: 10px;
+  }
 </style>
-</head>
 <body>
 <div id="app">
   <!-- BOTTOM NAV / SIDEBAR -->
@@ -907,6 +943,7 @@ let state = {
   papeleria: [],
   movimientos: [],
   notas: [],
+  recetas: [],
   nextId: 1,
 };
 
@@ -960,6 +997,7 @@ function saveState() {
   saveCollection('papeleria', state.papeleria);
   saveCollection('movimientos', state.movimientos);
   saveCollection('notas', state.notas);
+  saveCollection('recetas', state.recetas);
   saveNextId(state.nextId);
   // Also save locally as backup
   localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
@@ -1009,7 +1047,7 @@ async function loadFromFirebase() {
 
   // Luego intentar Firebase con timeout de 5 segundos
   const firebasePromise = (async () => {
-    const cols = ['pedidos','ingredientes','papeleria','movimientos','notas'];
+    const cols = ['pedidos','ingredientes','papeleria','movimientos','notas','recetas'];
     const results = await Promise.all(
       cols.map(c => db.collection('app').doc(c).get())
     );
@@ -1042,7 +1080,7 @@ async function loadFromFirebase() {
 
 // Real-time listeners for live sync between devices
 function setupRealtimeSync() {
-  const cols = ['pedidos','ingredientes','movimientos','notas'];
+  const cols = ['pedidos','ingredientes','movimientos','notas','recetas'];
   cols.forEach(c => {
     db.collection('app').doc(c).onSnapshot(doc => {
       if (doc.exists) {
@@ -1601,16 +1639,18 @@ function renderItemsList() {
     return;
   }
   const total = _pedidoItems.reduce((s, i) => s + i.subtotal, 0);
-  el.innerHTML = _pedidoItems.map((item, idx) => `
+  el.innerHTML = _pedidoItems.map((item, idx) => {
+    const tieneReceta = state.recetas.some(r => r.producto === item.producto);
+    return `
     <div class="item-row">
       <div class="item-row-info">
-        <div class="item-row-name">${item.producto}</div>
-        <div class="item-row-detail">x${item.cantidad} · $${item.precioUnit} c/u</div>
+        <div class="item-row-name">${item.producto} ${tieneReceta ? '<span title="Tiene receta — descontará stock" style="font-size:11px;color:var(--accent)">📋</span>' : ''}</div>
+        <div class="item-row-detail">x${item.cantidad} · $${item.precioUnit} c/u${tieneReceta ? ' · <span style="color:var(--accent);font-size:11px">descuenta stock</span>' : ''}</div>
       </div>
       <div class="item-row-price">$${item.subtotal.toLocaleString('es-AR')}</div>
       <button class="item-row-del" onclick="quitarItemPedido(${idx})">✕</button>
     </div>
-  `).join('') + `
+  `}).join('') + `
     <div class="total-row">
       <span>Total</span>
       <span>$${total.toLocaleString('es-AR')}</span>
@@ -1854,11 +1894,19 @@ function savePedido(id) {
   if (id) {
     const idx = state.pedidos.findIndex(p => p.id === id);
     state.pedidos[idx] = { ...state.pedidos[idx], ...data };
+    saveState(); closeModal();
+    showToast('✏️ Pedido actualizado');
   } else {
     state.pedidos.push({ id: nextId(), ...data });
+    // Descontar materia prima según recetas
+    const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
+    saveState(); closeModal();
+    if (descuentos.length > 0) {
+      showToast('📦 Pedido creado · 🧂 ' + descuentos.slice(0, 3).join(', ') + (descuentos.length > 3 ? ' y más...' : ''));
+    } else {
+      showToast('📦 Pedido creado');
+    }
   }
-  saveState(); closeModal();
-  showToast(id ? '✏️ Pedido actualizado' : '📦 Pedido creado');
   renderScreen(activeScreen);
   // Esperar un tick para que el SW esté listo antes de programar
   if (Notification.permission === 'granted') {
@@ -1898,6 +1946,14 @@ function renderStock() {
     ${sorted.length === 0
       ? `<div class="empty-state" style="padding:20px 0"><div class="empty-icon">🧂</div><p>Sin ingredientes. Tocá + para agregar.</p></div>`
       : `<div class="list-2col">${sorted.map(i => ingredienteItem(i, 'mp')).join('')}</div>`}
+
+    <div style="height:16px"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div class="section-title" style="margin-bottom:0">📋 Recetas</div>
+      <button class="btn btn-primary btn-sm" onclick="openRecetaForm(null)">+ Receta</button>
+    </div>
+    <div class="section-sub">Ingredientes por producto — se descuentan al crear un pedido</div>
+    ${renderRecetasList()}
 
     <div style="height:16px"></div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
@@ -2074,6 +2130,212 @@ function confirmEliminarIngrediente(id) {
 
 // Autocomplete en campo "Nombre" del formulario de ingrediente
 // Sugiere ingredientes YA existentes para evitar duplicados y facilitar edición
+
+/* -------- RECETAS -------- */
+
+// Solo productos del catálogo que tienen precio
+const CATALOGO_CON_PRECIO = CATALOGO.filter(p => p.precio !== null);
+
+function renderRecetasList() {
+  if (state.recetas.length === 0) {
+    return `<div class="empty-state" style="padding:20px 0"><div class="empty-icon">📋</div><p>Sin recetas. Tocá + para agregar.</p></div>`;
+  }
+  return state.recetas.map(r => {
+    const ings = r.ingredientes || [];
+    const listHtml = ings.length > 0
+      ? `<ul class="receta-ing-list">${ings.map(i => {
+          const ing = state.ingredientes.find(x => x.id === i.ingId);
+          return `<li><span>${ing ? ing.nombre : '(eliminado)'}</span><span>${i.cantidad} ${ing ? ing.unidad : ''}</span></li>`;
+        }).join('')}</ul>`
+      : `<div style="font-size:12px;color:var(--text3);margin-bottom:8px">Sin ingredientes cargados aún</div>`;
+    return `
+      <div class="receta-card">
+        <div class="receta-card-header">
+          <div class="receta-card-nombre">${r.producto}</div>
+          <div class="receta-card-rinde">Rinde: ${r.rinde} ${r.unidadRinde}</div>
+        </div>
+        ${listHtml}
+        <div class="receta-actions">
+          <button class="btn btn-ghost btn-sm" onclick="openRecetaForm(${r.id})">✏️ Editar</button>
+          <button class="btn btn-danger btn-sm" onclick="confirmEliminarReceta(${r.id})">🗑</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// _recetaItems: lista de { ingId, cantidad } en edición
+let _recetaItems = [];
+
+function openRecetaForm(id) {
+  const r = id ? state.recetas.find(x => x.id === id) : null;
+  _recetaItems = r?.ingredientes ? JSON.parse(JSON.stringify(r.ingredientes)) : [];
+
+  const productosOpts = CATALOGO_CON_PRECIO.map(p =>
+    `<option value="${p.nombre}" ${r?.producto === p.nombre ? 'selected' : ''}>${p.nombre} — $${p.precio.toLocaleString('es-AR')}</option>`
+  ).join('');
+
+  const unidadesRinde = ['g','kg','un','docena','1/4 kg','1/2 kg'];
+  const unidadOpts = unidadesRinde.map(u => `<option value="${u}" ${r?.unidadRinde === u ? 'selected' : ''}>${u}</option>`).join('');
+
+  openModal(`
+    <div class="modal-title">${r ? 'Editar receta' : 'Nueva receta'}</div>
+    <div class="form-group">
+      <label class="form-label">Producto *</label>
+      <select class="form-input" id="f-rec-producto">
+        <option value="">— Elegir producto —</option>
+        ${productosOpts}
+      </select>
+    </div>
+    <div class="flex gap-8" style="margin-bottom:14px">
+      <div style="flex:1">
+        <label class="form-label">Cantidad que rinde *</label>
+        <input class="form-input" id="f-rec-rinde" type="number" min="0.01" step="0.01" value="${r?.rinde || ''}">
+      </div>
+      <div style="flex:1">
+        <label class="form-label">Unidad</label>
+        <select class="form-input" id="f-rec-unidad-rinde">
+          ${unidadOpts}
+        </select>
+      </div>
+    </div>
+
+    <div class="form-label" style="margin-bottom:6px">Ingredientes de la receta</div>
+    <div id="receta-items-list"></div>
+
+    <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px;border:1px solid var(--border);margin-bottom:14px">
+      <div class="form-label" style="margin-bottom:8px">Agregar ingrediente</div>
+      <div class="flex gap-8" style="margin-bottom:8px">
+        <div style="flex:2">
+          <label class="form-label">Materia prima</label>
+          <select class="form-input" id="f-rec-ing">
+            <option value="">— Elegir —</option>
+            ${state.ingredientes.map(i => `<option value="${i.id}">${i.nombre} (${i.unidad})</option>`).join('')}
+          </select>
+        </div>
+        <div style="flex:1">
+          <label class="form-label">Cantidad</label>
+          <input class="form-input" id="f-rec-cant" type="number" min="0.001" step="0.001" placeholder="0">
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-full" onclick="agregarIngReceta()">+ Agregar ingrediente</button>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="saveReceta(${id || 'null'})">💾 Guardar receta</button>
+    </div>
+  `);
+  setTimeout(() => renderRecetaItemsList(), 50);
+}
+
+function renderRecetaItemsList() {
+  const el = document.getElementById('receta-items-list');
+  if (!el) return;
+  if (_recetaItems.length === 0) {
+    el.innerHTML = '<div style="font-size:12px;color:var(--text3);margin-bottom:8px">Sin ingredientes aún</div>';
+    return;
+  }
+  el.innerHTML = _recetaItems.map((item, idx) => {
+    const ing = state.ingredientes.find(x => x.id === item.ingId);
+    return `
+      <div class="item-row">
+        <div class="item-row-info">
+          <div class="item-row-name">${ing ? ing.nombre : '(eliminado)'}</div>
+          <div class="item-row-detail">${item.cantidad} ${ing ? ing.unidad : ''}</div>
+        </div>
+        <button class="item-row-del" onclick="quitarIngReceta(${idx})">✕</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function agregarIngReceta() {
+  const ingId = parseInt(document.getElementById('f-rec-ing').value);
+  const cant = parseFloat(document.getElementById('f-rec-cant').value);
+  if (!ingId) { showToast('⚠️ Elegí un ingrediente'); return; }
+  if (!cant || cant <= 0) { showToast('⚠️ Ingresá una cantidad válida'); return; }
+  // No duplicar el mismo ingrediente
+  if (_recetaItems.find(x => x.ingId === ingId)) {
+    showToast('⚠️ Ese ingrediente ya está en la receta'); return;
+  }
+  _recetaItems.push({ ingId, cantidad: cant });
+  document.getElementById('f-rec-ing').value = '';
+  document.getElementById('f-rec-cant').value = '';
+  renderRecetaItemsList();
+}
+
+function quitarIngReceta(idx) {
+  _recetaItems.splice(idx, 1);
+  renderRecetaItemsList();
+}
+
+function saveReceta(id) {
+  const producto = document.getElementById('f-rec-producto').value;
+  const rinde = parseFloat(document.getElementById('f-rec-rinde').value);
+  const unidadRinde = document.getElementById('f-rec-unidad-rinde').value;
+  if (!producto) { showToast('⚠️ Elegí un producto'); return; }
+  if (!rinde || rinde <= 0) { showToast('⚠️ Ingresá la cantidad que rinde'); return; }
+  if (_recetaItems.length === 0) { showToast('⚠️ Agregá al menos un ingrediente'); return; }
+
+  const data = { producto, rinde, unidadRinde, ingredientes: [..._recetaItems] };
+
+  if (id) {
+    const idx = state.recetas.findIndex(r => r.id === id);
+    state.recetas[idx] = { ...state.recetas[idx], ...data };
+    showToast('✏️ Receta actualizada');
+  } else {
+    // Si ya existe receta para ese producto, reemplazar
+    const existing = state.recetas.findIndex(r => r.producto === producto);
+    if (existing >= 0) {
+      state.recetas[existing] = { ...state.recetas[existing], ...data };
+      showToast('✏️ Receta actualizada');
+    } else {
+      state.recetas.push({ id: nextId(), ...data });
+      showToast('📋 Receta guardada');
+    }
+  }
+  saveState();
+  closeModal();
+  renderScreen(activeScreen);
+}
+
+function confirmEliminarReceta(id) {
+  const r = state.recetas.find(x => x.id === id);
+  showConfirm('¿Eliminar receta?', `Se eliminará la receta de "${r.producto}".`, () => {
+    state.recetas = state.recetas.filter(x => x.id !== id);
+    saveState(); closeModal();
+    showToast('Receta eliminada');
+    renderStock();
+  });
+}
+
+/**
+ * Descuenta materia prima al crear un pedido nuevo.
+ * Para cada item del pedido, busca si tiene receta y descuenta
+ * proporcionalmente según la cantidad vendida vs la cantidad que rinde la receta.
+ * Devuelve un resumen de lo descontado para el toast.
+ */
+function descontarMateriaPrimaByPedido(items) {
+  const descuentos = [];
+  items.forEach(item => {
+    const receta = state.recetas.find(r => r.producto === item.producto);
+    if (!receta || !receta.ingredientes || receta.ingredientes.length === 0) return;
+
+    // Factor = cuántas "recetas completas" se necesitan para este item
+    // La receta rinde `receta.rinde` unidades; el pedido pide `item.cantidad`
+    const factor = item.cantidad / receta.rinde;
+
+    receta.ingredientes.forEach(ri => {
+      const ing = state.ingredientes.find(x => x.id === ri.ingId);
+      if (!ing) return;
+      const cantDescontar = Math.round(ri.cantidad * factor * 1000) / 1000;
+      ing.stock = Math.max(0, Math.round((ing.stock - cantDescontar) * 1000) / 1000);
+      descuentos.push(`${ing.nombre}: -${cantDescontar} ${ing.unidad}`);
+    });
+  });
+  return descuentos;
+}
 
 /* -------- PAPELERÍA -------- */
 function openSumarPapeleria(id) {

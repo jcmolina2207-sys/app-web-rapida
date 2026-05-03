@@ -44,3 +44,8 @@ esto requeriria detallar todo lo usado para cada producto asi la ia lo va descon
 --------------solucionado ------------------------------
 
 en finanzas, movimientos, tengo que poder seleccionar un movimiento y poder editarlo en caso de ser necesario 
+----------------------------------------------------------------------------------------
+
+en pedidos que estan las dos lineas, estado del pedido y estado de pago, que ocupen menos lugar, se me ocurre dos box list que predeterminado cuando ingresas 
+diga todos, pero que uno pueda seleccionar de un listado estado del pedido: pendiente entregado, en estado de pago, pagado o debe, en la 
+parte de arriba esta dos veces el titulo pedidos es redundante, que quede el de arriba de todo nomas, y el logo mas chico sacalo, que quede solo el de la parte superior izquierda

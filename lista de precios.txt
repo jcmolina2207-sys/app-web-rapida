@@ -1,0 +1,34 @@
+Alfajores
+	Alfajor de maicena  x12 $8.000 x24 $15.500
+	Alfajor de coco $
+	Alfajor de maicena c/chocolate $
+	Alfajor bon o non $3.500	
+	Alfajor dos corazones $3.500
+	Alfajor marplatense c/u $1.000 x12 $11.000
+	
+churros
+	Por unidad
+	Simple: $500
+        DDL: $700
+        Chocolate: $800
+        Chocolate + DDL: $1.100
+	
+	Por docena
+	Simple $5.500  
+	DDL $8.000
+	CH $9.500
+	CH + DDL $13.000
+Tortas
+	Bizcochuelo $4.500
+	Lemon pie $18.000	
+	Torta brownie $26.000
+	pastafrola bata 14 cm $12.000
+	pastafrola membrillo 14 cm $14.000
+
+Pan
+	Biscochitos 1/4 $1.600
+	Chipa 1/4 $
+	Chips de j/q $
+	Libritos 1/4 $
+	Trenzas 1/4 $
+

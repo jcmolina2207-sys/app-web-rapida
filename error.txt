@@ -49,3 +49,9 @@ en finanzas, movimientos, tengo que poder seleccionar un movimiento y poder edit
 en pedidos que estan las dos lineas, estado del pedido y estado de pago, que ocupen menos lugar, se me ocurre dos box list que predeterminado cuando ingresas 
 diga todos, pero que uno pueda seleccionar de un listado estado del pedido: pendiente entregado, en estado de pago, pagado o debe, en la 
 parte de arriba esta dos veces el titulo pedidos es redundante, que quede el de arriba de todo nomas, y el logo mas chico sacalo, que quede solo el de la parte superior izquierda
+
+------------------------------------
+
+en base al listado de productos que se encuentran a la venta (solo los que tienen precio), se deberia poder cargar la receta de por ejemplo para X cantidad de biscochitos, para que
+al momento de una venta de por ejemplo un cuarto de biscochitos se descuenta automaticamente de la materia prima los productos utilizados para la receta, y que ese descuento en la 
+materia prima se realize al momento de dar de alta un pedido

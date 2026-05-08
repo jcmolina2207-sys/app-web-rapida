@@ -944,6 +944,7 @@ let state = {
   movimientos: [],
   notas: [],
   recetas: [],
+  catalogo: [],   // productos personalizados agregados por Sofi
   nextId: 1,
 };
 
@@ -998,6 +999,7 @@ function saveState() {
   saveCollection('movimientos', state.movimientos);
   saveCollection('notas', state.notas);
   saveCollection('recetas', state.recetas);
+  saveCollection('catalogo', state.catalogo);
   saveNextId(state.nextId);
   // Also save locally as backup
   localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
@@ -1047,7 +1049,7 @@ async function loadFromFirebase() {
 
   // Luego intentar Firebase con timeout de 5 segundos
   const firebasePromise = (async () => {
-    const cols = ['pedidos','ingredientes','papeleria','movimientos','notas','recetas'];
+    const cols = ['pedidos','ingredientes','papeleria','movimientos','notas','recetas','catalogo'];
     const results = await Promise.all(
       cols.map(c => db.collection('app').doc(c).get())
     );
@@ -1080,7 +1082,7 @@ async function loadFromFirebase() {
 
 // Real-time listeners for live sync between devices
 function setupRealtimeSync() {
-  const cols = ['pedidos','ingredientes','movimientos','notas','recetas'];
+  const cols = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo'];
   cols.forEach(c => {
     db.collection('app').doc(c).onSnapshot(doc => {
       if (doc.exists) {
@@ -1407,9 +1409,12 @@ function renderPedidos() {
   }
 
   el.innerHTML = `
-    <div class="section-sub">${state.pedidos.length} pedidos en total</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div class="section-sub" style="margin-bottom:0">${state.pedidos.length} pedido${state.pedidos.length !== 1 ? 's' : ''} en total</div>
+      <button class="btn btn-primary btn-sm" onclick="openPedidoForm(null)">+ Nuevo</button>
+    </div>
 
-    <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center">
+    <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center;margin-top:10px">
       <div style="flex:1">
         <select class="form-input" style="font-size:13px;padding:8px 10px;cursor:pointer"
           onchange="setPedidoFiltroEstado(this.value)">
@@ -1521,7 +1526,8 @@ function confirmEliminarPedido(id) {
 }
 
 /* Catálogo de productos de Sofi */
-const CATALOGO = [
+// Catálogo BASE (no modificable, siempre disponible)
+const CATALOGO_BASE = [
   { cat: '🍪 Alfajores', nombre: 'Alfajor de maicena x12',           precio: 8000 },
   { cat: '🍪 Alfajores', nombre: 'Alfajor de maicena x24',           precio: 15500 },
   { cat: '🍪 Alfajores', nombre: 'Alfajor de coco',                  precio: null },
@@ -1549,6 +1555,24 @@ const CATALOGO = [
   { cat: '🍞 Pan', nombre: 'Libritos 1/4',     precio: null },
   { cat: '🍞 Pan', nombre: 'Trenzas 1/4',      precio: null },
 ];
+
+// Catálogo dinámico = base + personalizados guardados en state.catalogo
+function getCatalogo() {
+  const custom = (state.catalogo || []).map(c => ({
+    cat: c.cat || '✨ Mis productos',
+    nombre: c.nombre,
+    precio: c.precio || null,
+    custom: true,
+  }));
+  // Evitar duplicados: si ya existe en base, no agregar de custom
+  const baseNombres = new Set(CATALOGO_BASE.map(p => p.nombre.toLowerCase()));
+  const soloNuevos = custom.filter(c => !baseNombres.has(c.nombre.toLowerCase()));
+  return [...CATALOGO_BASE, ...soloNuevos];
+}
+
+// Para usar en código que antes usaba CATALOGO directamente
+// (mantenemos compatibilidad usando función en lugar de constante)
+const CATALOGO = CATALOGO_BASE; // referencia para backward compat donde se necesite
 
 // Items temporales del pedido en edición
 let _pedidoItems = [];
@@ -1663,6 +1687,15 @@ function agregarItemPedido() {
   const precioUnit = parsePrecio(document.getElementById('f-precio-unit')?.value);
   if (!prod) { showToast('⚠️ Escribí un producto'); return; }
   if (!precioUnit) { showToast('⚠️ Ingresá el precio unitario'); return; }
+
+  // Si el producto es nuevo, guardarlo en el catálogo
+  const eraDesconocido = !getCatalogo().some(p => p.nombre.toLowerCase() === prod.toLowerCase());
+  if (eraDesconocido) {
+    agregarProductoAlCatalogoSiEsNuevo(prod, precioUnit);
+    saveState(); // guardar catálogo actualizado
+    showToast(`✨ "${prod}" guardado en tu catálogo`);
+  }
+
   _pedidoItems.push({ producto: prod, cantidad: cant, precioUnit, subtotal: cant * precioUnit });
   // Limpiar campos
   document.getElementById('f-producto').value = '';
@@ -1809,16 +1842,13 @@ function initProductoAutocomplete() {
   }
 
   function renderDropdown(query) {
+    const catalogoActual = getCatalogo();
     const q = query.trim().toLowerCase();
     const matches = q
-      ? CATALOGO.filter(p => p.nombre.toLowerCase().includes(q) || p.cat.toLowerCase().includes(q))
-      : CATALOGO;
+      ? catalogoActual.filter(p => p.nombre.toLowerCase().includes(q) || p.cat.toLowerCase().includes(q))
+      : catalogoActual;
 
-    if (matches.length === 0) {
-      dropdown.innerHTML = '<div style="padding:12px 14px;font-size:13px;color:var(--text3)">Sin resultados</div>';
-      dropdown.classList.add('open');
-      return;
-    }
+    const exactMatch = catalogoActual.some(p => p.nombre.toLowerCase() === q);
 
     // Agrupar por categoría
     const cats = {};
@@ -1832,12 +1862,29 @@ function initProductoAutocomplete() {
       html += `<div class="prod-cat">${cat}</div>`;
       items.forEach(item => {
         const precioStr = item.precio ? `$${item.precio.toLocaleString('es-AR')} c/u` : '';
-        html += `<div class="prod-option" data-nombre="${item.nombre}" data-precio="${item.precio||''}">
+        html += `<div class="prod-option" data-nombre="${item.nombre.replace(/"/g,'&quot;')}" data-precio="${item.precio||''}">
           <span>${highlight(item.nombre, q)}</span>
           ${precioStr ? `<span class="prod-precio">${precioStr}</span>` : '<span class="prod-precio" style="color:var(--text3);font-weight:400">Ingresar precio</span>'}
         </div>`;
       });
     });
+
+    // Opción de agregar nuevo si no hay match exacto y hay texto
+    if (q && !exactMatch) {
+      const nombreNuevo = query.trim();
+      html += `<div class="prod-cat">✨ Nuevo producto</div>
+        <div class="prod-option" data-nombre="${nombreNuevo.replace(/"/g,'&quot;')}" data-precio="" data-nuevo="true"
+          style="color:var(--accent);font-weight:600">
+          <span>➕ Agregar "${nombreNuevo}" al catálogo</span>
+          <span class="prod-precio" style="color:var(--text3);font-weight:400">nuevo</span>
+        </div>`;
+    }
+
+    if (!html) {
+      dropdown.innerHTML = '<div style="padding:12px 14px;font-size:13px;color:var(--text3)">Sin resultados</div>';
+      dropdown.classList.add('open');
+      return;
+    }
 
     dropdown.innerHTML = html;
     dropdown.classList.add('open');
@@ -1846,12 +1893,21 @@ function initProductoAutocomplete() {
       opt.addEventListener('mousedown', (e) => {
         e.preventDefault();
         input.value = opt.dataset.nombre;
-        setPrecioUnitario(opt.dataset.precio);
-        dropdown.classList.remove('open');
-        // Si no tiene precio fijo, enfocar el campo precio
-        if (!opt.dataset.precio) {
+        // Si es nuevo, agregarlo al catálogo y mostrar mensaje en hint
+        if (opt.dataset.nuevo === 'true') {
+          agregarProductoAlCatalogoSiEsNuevo(opt.dataset.nombre, null);
+          saveState();
+          const hint = document.getElementById('f-precio-hint');
+          if (hint) hint.textContent = '✨ Producto guardado en tu catálogo';
           setTimeout(() => { precioEl.focus(); precioEl.select(); }, 50);
+        } else {
+          setPrecioUnitario(opt.dataset.precio);
+          // Si no tiene precio fijo, enfocar el campo precio
+          if (!opt.dataset.precio) {
+            setTimeout(() => { precioEl.focus(); precioEl.select(); }, 50);
+          }
         }
+        dropdown.classList.remove('open');
       });
     });
   }
@@ -1859,7 +1915,8 @@ function initProductoAutocomplete() {
   input.addEventListener('focus', () => renderDropdown(input.value));
   input.addEventListener('input', () => {
     // Al escribir libremente, buscar si coincide exactamente con un producto del catálogo
-    const match = CATALOGO.find(p => p.nombre.toLowerCase() === input.value.trim().toLowerCase());
+    const catAct = getCatalogo();
+    const match = catAct.find(p => p.nombre.toLowerCase() === input.value.trim().toLowerCase());
     setPrecioUnitario(match ? match.precio : null);
     renderDropdown(input.value);
   });
@@ -1931,11 +1988,10 @@ function renderStock() {
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div class="section-title" style="margin-bottom:0">Materia Prima</div>
+      <div class="section-sub" style="margin-bottom:0">🧂 Ingredientes · Stock general: ${pct}%</div>
       <button class="btn btn-primary btn-sm" onclick="openIngredienteForm(null)">+ Ingrediente</button>
     </div>
-    <div class="section-sub">Stock general: ${pct}%</div>
-    <div class="card mb-12">
+    <div class="card mb-12" style="margin-top:10px">
       <div class="progress-wrap">
         <div class="progress-bar ${stockColor(pct)}" style="width:${pct}%"></div>
       </div>
@@ -1949,18 +2005,18 @@ function renderStock() {
 
     <div style="height:16px"></div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div class="section-title" style="margin-bottom:0">📋 IPP</div>
-      <button class="btn btn-primary btn-sm" onclick="openRecetaForm(null)"> Productos </button>
+      <div class="section-title" style="margin-bottom:0;font-size:16px">📋 Ingredientes por producto</div>
+      <button class="btn btn-primary btn-sm" onclick="openRecetaForm(null)">+ Receta</button>
     </div>
-    <div class="section-sub">Ingredientes por producto — se descuentan al crear un pedido</div>
+    <div class="section-sub">Se descuentan automáticamente en Materia prima al crear un pedido</div>
     ${renderRecetasList()}
 
     <div style="height:16px"></div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div class="section-title" style="margin-bottom:0">📋 Papelería</div>
+      <div class="section-title" style="margin-bottom:0;font-size:16px">📋 Papelería · ${pap}%</div>
       <button class="btn btn-primary btn-sm" onclick="openPapeleriaForm(null)">+ Artículo</button>
     </div>
-    <div class="section-sub">Stock de papelería: ${pap}%</div>
+    <div class="section-sub">Cajas, bolsas, stickers y otros materiales de empaque</div>
     <div class="card mb-12">
       <div class="progress-wrap">
         <div class="progress-bar ${stockColor(pap)}" style="width:${pap}%"></div>
@@ -2134,7 +2190,10 @@ function confirmEliminarIngrediente(id) {
 /* -------- RECETAS -------- */
 
 // Solo productos del catálogo que tienen precio
-const CATALOGO_CON_PRECIO = CATALOGO.filter(p => p.precio !== null);
+// Catálogo con precio (para recetas): base + custom, solo con precio definido
+function getCatalogoConPrecio() {
+  return getCatalogo().filter(p => p.precio !== null);
+}
 
 function renderRecetasList() {
   if (state.recetas.length === 0) {
@@ -2171,10 +2230,6 @@ function openRecetaForm(id) {
   const r = id ? state.recetas.find(x => x.id === id) : null;
   _recetaItems = r?.ingredientes ? JSON.parse(JSON.stringify(r.ingredientes)) : [];
 
-  const productosOpts = CATALOGO_CON_PRECIO.map(p =>
-    `<option value="${p.nombre}" ${r?.producto === p.nombre ? 'selected' : ''}>${p.nombre} — $${p.precio.toLocaleString('es-AR')}</option>`
-  ).join('');
-
   const unidadesRinde = ['g','kg','un','docena','1/4 kg','1/2 kg'];
   const unidadOpts = unidadesRinde.map(u => `<option value="${u}" ${r?.unidadRinde === u ? 'selected' : ''}>${u}</option>`).join('');
 
@@ -2182,10 +2237,16 @@ function openRecetaForm(id) {
     <div class="modal-title">${r ? 'Editar receta' : 'Nueva receta'}</div>
     <div class="form-group">
       <label class="form-label">Producto *</label>
-      <select class="form-input" id="f-rec-producto">
-        <option value="">— Elegir producto —</option>
-        ${productosOpts}
-      </select>
+      <div class="cliente-wrap">
+        <input class="form-input" id="f-rec-producto" type="text"
+          placeholder="Escribí o elegí un producto..."
+          value="${r?.producto || ''}"
+          autocomplete="off">
+        <div class="cliente-dropdown" id="rec-prod-dropdown"></div>
+      </div>
+      <div id="rec-prod-nuevo-aviso" style="display:none;margin-top:6px;padding:8px 12px;background:var(--accent-light);border-radius:8px;font-size:12px;color:var(--accent);border:1px solid var(--border)">
+        ✨ Producto nuevo — se guardará en tu catálogo cuando guardes la receta
+      </div>
     </div>
     <div class="flex gap-8" style="margin-bottom:14px">
       <div style="flex:1">
@@ -2226,7 +2287,10 @@ function openRecetaForm(id) {
       <button class="btn btn-primary w-100" onclick="saveReceta(${id || 'null'})">💾 Guardar receta</button>
     </div>
   `);
-  setTimeout(() => renderRecetaItemsList(), 50);
+  setTimeout(() => {
+    renderRecetaItemsList();
+    initRecetaProductoAutocomplete();
+  }, 50);
 }
 
 function renderRecetaItemsList() {
@@ -2270,29 +2334,133 @@ function quitarIngReceta(idx) {
   renderRecetaItemsList();
 }
 
+function initRecetaProductoAutocomplete() {
+  const input    = document.getElementById('f-rec-producto');
+  const dropdown = document.getElementById('rec-prod-dropdown');
+  const aviso    = document.getElementById('rec-prod-nuevo-aviso');
+  if (!input || !dropdown) return;
+
+  function normalizar(s) {
+    return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  }
+  function highlight(text, q) {
+    if (!q) return text;
+    const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
+    return text.replace(re, '<mark>$1</mark>');
+  }
+
+  function renderDrop(val) {
+    const cat = getCatalogo();
+    const q = normalizar(val.trim());
+    if (!val.trim()) { dropdown.classList.remove('open'); if (aviso) aviso.style.display = 'none'; return; }
+
+    const matches = q ? cat.filter(p => normalizar(p.nombre).includes(q)) : cat;
+    const exactMatch = cat.some(p => normalizar(p.nombre) === q);
+
+    let html = '';
+    if (matches.length > 0) {
+      // Agrupar por categoría
+      const grupos = {};
+      matches.forEach(p => {
+        if (!grupos[p.cat]) grupos[p.cat] = [];
+        grupos[p.cat].push(p);
+      });
+      Object.entries(grupos).forEach(([cat, items]) => {
+        html += `<div class="prod-cat">${cat}</div>`;
+        items.forEach(item => {
+          const precioStr = item.precio ? `$${item.precio.toLocaleString('es-AR')}` : 'Sin precio';
+          html += `<div class="prod-option" data-nombre="${item.nombre.replace(/"/g,'&quot;')}" data-custom="${item.custom||''}">
+            <span>${highlight(item.nombre, q)}</span>
+            <span class="prod-precio">${precioStr}</span>
+          </div>`;
+        });
+      });
+    }
+
+    // Opción de agregar nuevo si no hay match exacto
+    if (!exactMatch && val.trim()) {
+      html += `<div class="prod-cat">✨ Nuevo producto</div>
+        <div class="prod-option" data-nombre="${val.trim().replace(/"/g,'&quot;')}" data-nuevo="true"
+          style="color:var(--accent);font-weight:600">
+          <span>➕ Agregar "${val.trim()}" al catálogo</span>
+          <span class="prod-precio" style="color:var(--text3)">nuevo</span>
+        </div>`;
+    }
+
+    if (!html) { dropdown.classList.remove('open'); return; }
+    dropdown.innerHTML = html;
+    dropdown.classList.add('open');
+
+    // Mostrar/ocultar aviso de producto nuevo
+    if (aviso) aviso.style.display = !exactMatch && val.trim() ? 'block' : 'none';
+
+    dropdown.querySelectorAll('.prod-option').forEach(opt => {
+      opt.addEventListener('mousedown', e => {
+        e.preventDefault();
+        input.value = opt.dataset.nombre;
+        dropdown.classList.remove('open');
+        // Si es nuevo, mostrar aviso; si ya existe, ocultarlo
+        const esNuevo = opt.dataset.nuevo === 'true';
+        if (aviso) aviso.style.display = esNuevo ? 'block' : 'none';
+        setTimeout(() => document.getElementById('f-rec-rinde')?.focus(), 50);
+      });
+    });
+  }
+
+  input.addEventListener('input', () => renderDrop(input.value));
+  input.addEventListener('focus', () => renderDrop(input.value));
+  input.addEventListener('blur', () => setTimeout(() => {
+    dropdown.classList.remove('open');
+    // Verificar si es nuevo al perder foco
+    const val = input.value.trim();
+    const esNuevo = val && !getCatalogo().some(p => p.nombre.toLowerCase() === val.toLowerCase());
+    if (aviso) aviso.style.display = (val && esNuevo) ? 'block' : 'none';
+  }, 160));
+}
+
+/**
+ * Agrega un producto nuevo al catálogo personalizado si no existe.
+ * Se llama desde saveReceta y agregarItemPedido cuando el nombre no está en getCatalogo().
+ */
+function agregarProductoAlCatalogoSiEsNuevo(nombre, precio) {
+  if (!nombre) return;
+  const cat = getCatalogo();
+  const yaExiste = cat.some(p => p.nombre.toLowerCase() === nombre.toLowerCase());
+  if (yaExiste) return; // no duplicar
+  state.catalogo = state.catalogo || [];
+  state.catalogo.push({ nombre, precio: precio || null, cat: '✨ Mis productos' });
+  // No guardamos aquí separado — se guarda con saveState() del llamador
+}
+
+
 function saveReceta(id) {
-  const producto = document.getElementById('f-rec-producto').value;
+  const productoEl = document.getElementById('f-rec-producto');
+  const producto = productoEl ? productoEl.value.trim() : '';
   const rinde = parseFloat(document.getElementById('f-rec-rinde').value);
   const unidadRinde = document.getElementById('f-rec-unidad-rinde').value;
-  if (!producto) { showToast('⚠️ Elegí un producto'); return; }
+  if (!producto) { showToast('⚠️ Escribí o elegí un producto'); return; }
   if (!rinde || rinde <= 0) { showToast('⚠️ Ingresá la cantidad que rinde'); return; }
   if (_recetaItems.length === 0) { showToast('⚠️ Agregá al menos un ingrediente'); return; }
+
+  // Guardar al catálogo si es un producto nuevo
+  const eraDesconocido = !getCatalogo().some(p => p.nombre.toLowerCase() === producto.toLowerCase());
+  agregarProductoAlCatalogoSiEsNuevo(producto, null);
 
   const data = { producto, rinde, unidadRinde, ingredientes: [..._recetaItems] };
 
   if (id) {
     const idx = state.recetas.findIndex(r => r.id === id);
     state.recetas[idx] = { ...state.recetas[idx], ...data };
-    showToast('✏️ Receta actualizada');
+    showToast('✏️ Receta actualizada' + (eraDesconocido ? ' · ✨ Producto guardado en catálogo' : ''));
   } else {
     // Si ya existe receta para ese producto, reemplazar
     const existing = state.recetas.findIndex(r => r.producto === producto);
     if (existing >= 0) {
       state.recetas[existing] = { ...state.recetas[existing], ...data };
-      showToast('✏️ Receta actualizada');
+      showToast('✏️ Receta actualizada' + (eraDesconocido ? ' · ✨ Producto guardado en catálogo' : ''));
     } else {
       state.recetas.push({ id: nextId(), ...data });
-      showToast('📋 Receta guardada');
+      showToast('📋 Receta guardada' + (eraDesconocido ? ' · ✨ Producto guardado en catálogo' : ''));
     }
   }
   saveState();
@@ -2595,8 +2763,7 @@ function renderFinanzas() {
   }
 
   el.innerHTML = `
-    <div class="section-title">Finanzas</div>
-    <div class="section-sub">Resumen financiero</div>
+    <div class="section-sub" style="margin-bottom:12px">Resumen de tus ingresos y egresos</div>
     <div class="summary-grid">
       <div class="summary-card">
         <div class="label">Saldo</div>
@@ -2896,10 +3063,10 @@ function renderNotas() {
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div class="section-title" style="margin-bottom:0">Anotaciones</div>
+      <div class="section-sub" style="margin-bottom:0">${state.notas.length} nota${state.notas.length !== 1 ? 's' : ''} guardada${state.notas.length !== 1 ? 's' : ''}</div>
       <button class="btn btn-primary btn-sm" onclick="openNotaForm(null)">+ Nueva nota</button>
     </div>
-    <div class="section-sub">${state.notas.length} notas guardadas</div>
+    <div style="height:12px"></div>
     ${sorted.length === 0 ? `<div class="empty-state"><div class="empty-icon">📓</div><p>Sin notas aún. Tocá + para crear una.</p></div>` :
       `<div class="list-2col">${sorted.map(n => notaItem(n)).join('')}</div>`
     }
@@ -3002,8 +3169,7 @@ function renderClientes() {
   const clientes = getClientes();
 
   el.innerHTML = `
-    <div class="section-title">Clientes</div>
-    <div class="section-sub">${clientes.length} clientes registrados</div>
+    <div class="section-sub" style="margin-bottom:16px">${clientes.length} cliente${clientes.length !== 1 ? 's' : ''} registrado${clientes.length !== 1 ? 's' : ''} · ordenados por total gastado</div>
     ${clientes.length === 0
       ? `<div class="empty-state"><div class="empty-icon">👥</div><p>Aún no hay clientes registrados</p></div>`
       : `<div class="list-2col">${clientes.map(c => clienteCard(c)).join('')}</div>`

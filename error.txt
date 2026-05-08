@@ -55,3 +55,7 @@ parte de arriba esta dos veces el titulo pedidos es redundante, que quede el de 
 en base al listado de productos que se encuentran a la venta (solo los que tienen precio), se deberia poder cargar la receta de por ejemplo para X cantidad de biscochitos, para que
 al momento de una venta de por ejemplo un cuarto de biscochitos se descuenta automaticamente de la materia prima los productos utilizados para la receta, y que ese descuento en la 
 materia prima se realize al momento de dar de alta un pedido
+
+------------------------------------------
+
+en esta pestaña, que al lado del boton productos (renombrarlo por "+ IPP"),  haya otro boton pero para agregar un producto nuevo a la lista

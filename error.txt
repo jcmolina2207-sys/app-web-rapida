@@ -59,3 +59,8 @@ materia prima se realize al momento de dar de alta un pedido
 ------------------------------------------
 
 en esta pestaña, que al lado del boton productos (renombrarlo por "+ IPP"),  haya otro boton pero para agregar un producto nuevo a la lista
+
+
+-------------
+
+agregar pepas medias docena

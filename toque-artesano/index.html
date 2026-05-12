@@ -773,6 +773,43 @@
   .prod-option mark {
     background: #bfdbfe; color: var(--text); border-radius: 2px; padding: 0 2px;
   }
+  /* ============================
+     RECETAS
+  ============================ */
+  .receta-card {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 14px;
+    margin-bottom: 10px;
+  }
+  .receta-card-header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 8px; margin-bottom: 8px;
+  }
+  .receta-card-nombre {
+    font-size: 14px; font-weight: 700; color: var(--text);
+    flex: 1;
+  }
+  .receta-card-rinde {
+    font-size: 12px; color: var(--text3); white-space: nowrap;
+  }
+  .receta-ing-list {
+    list-style: none; padding: 0; margin: 0 0 10px;
+  }
+  .receta-ing-list li {
+    font-size: 13px; color: var(--text2);
+    padding: 3px 0;
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between;
+  }
+  .receta-ing-list li:last-child { border-bottom: none; }
+  .receta-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .receta-warn {
+    font-size:12px; color:var(--yellow);
+    background:var(--yellow-light); border-radius:6px;
+    padding: 6px 10px; margin-bottom: 10px;
+  }
 </style>
 </head>
 <body>
@@ -907,6 +944,8 @@ let state = {
   papeleria: [],
   movimientos: [],
   notas: [],
+  recetas: [],
+  catalogo: [],   // productos personalizados agregados por Sofi
   nextId: 1,
 };
 
@@ -960,6 +999,8 @@ function saveState() {
   saveCollection('papeleria', state.papeleria);
   saveCollection('movimientos', state.movimientos);
   saveCollection('notas', state.notas);
+  saveCollection('recetas', state.recetas);
+  saveCollection('catalogo', state.catalogo);
   saveNextId(state.nextId);
   // Also save locally as backup
   localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
@@ -1009,7 +1050,7 @@ async function loadFromFirebase() {
 
   // Luego intentar Firebase con timeout de 5 segundos
   const firebasePromise = (async () => {
-    const cols = ['pedidos','ingredientes','papeleria','movimientos','notas'];
+    const cols = ['pedidos','ingredientes','papeleria','movimientos','notas','recetas','catalogo'];
     const results = await Promise.all(
       cols.map(c => db.collection('app').doc(c).get())
     );
@@ -1042,7 +1083,7 @@ async function loadFromFirebase() {
 
 // Real-time listeners for live sync between devices
 function setupRealtimeSync() {
-  const cols = ['pedidos','ingredientes','movimientos','notas'];
+  const cols = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo'];
   cols.forEach(c => {
     db.collection('app').doc(c).onSnapshot(doc => {
       if (doc.exists) {
@@ -1369,9 +1410,12 @@ function renderPedidos() {
   }
 
   el.innerHTML = `
-    <div class="section-sub">${state.pedidos.length} pedidos en total</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div class="section-sub" style="margin-bottom:0">${state.pedidos.length} pedido${state.pedidos.length !== 1 ? 's' : ''} en total</div>
+      <button class="btn btn-primary btn-sm" onclick="openPedidoForm(null)">+ Nuevo</button>
+    </div>
 
-    <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center">
+    <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center;margin-top:10px">
       <div style="flex:1">
         <select class="form-input" style="font-size:13px;padding:8px 10px;cursor:pointer"
           onchange="setPedidoFiltroEstado(this.value)">
@@ -1483,11 +1527,10 @@ function confirmEliminarPedido(id) {
 }
 
 /* Catálogo de productos de Sofi */
-const CATALOGO = [
+// Catálogo BASE (no modificable, siempre disponible)
+const CATALOGO_BASE = [
   { cat: '🍪 Alfajores', nombre: 'Alfajor de maicena x12',           precio: 8000 },
   { cat: '🍪 Alfajores', nombre: 'Alfajor de maicena x24',           precio: 15500 },
-  { cat: '🍪 Alfajores', nombre: 'Alfajor de coco',                  precio: null },
-  { cat: '🍪 Alfajores', nombre: 'Alfajor de maicena c/chocolate',   precio: null },
   { cat: '🍪 Alfajores', nombre: 'Alfajor bon o bon',                precio: 3500 },
   { cat: '🍪 Alfajores', nombre: 'Alfajor dos corazones',            precio: 3500 },
   { cat: '🍪 Alfajores', nombre: 'Alfajor marplatense c/u',          precio: 1000 },
@@ -1496,6 +1539,10 @@ const CATALOGO = [
   { cat: '🥐 Churros — por unidad', nombre: 'Churro DDL',            precio: 700 },
   { cat: '🥐 Churros — por unidad', nombre: 'Churro chocolate',      precio: 800 },
   { cat: '🥐 Churros — por unidad', nombre: 'Churro chocolate + DDL',precio: 1100 },
+  { cat: '🥐 Churros — por media docena', nombre: 'Docena churros simples',precio: 5500 },
+  { cat: '🥐 Churros — por media docena', nombre: 'Docena churros DDL',    precio: 8000 },
+  { cat: '🥐 Churros — por media docena', nombre: 'Docena churros chocolate', precio: 9500 },
+  { cat: '🥐 Churros — por media docena', nombre: 'Docena churros chocolate + DDL', precio: 13000 },
   { cat: '🥐 Churros — por docena', nombre: 'Docena churros simples',precio: 5500 },
   { cat: '🥐 Churros — por docena', nombre: 'Docena churros DDL',    precio: 8000 },
   { cat: '🥐 Churros — por docena', nombre: 'Docena churros chocolate', precio: 9500 },
@@ -1505,12 +1552,216 @@ const CATALOGO = [
   { cat: '🎂 Tortas', nombre: 'Torta brownie',            precio: 26000 },
   { cat: '🎂 Tortas', nombre: 'Pastafrola bata 14 cm',   precio: 12000 },
   { cat: '🎂 Tortas', nombre: 'Pastafrola membrillo 14 cm', precio: 14000 },
-  { cat: '🍞 Pan', nombre: 'Biscochitos 1/4',  precio: 1600 },
-  { cat: '🍞 Pan', nombre: 'Chipa 1/4',        precio: null },
-  { cat: '🍞 Pan', nombre: 'Chips de j/q',     precio: null },
-  { cat: '🍞 Pan', nombre: 'Libritos 1/4',     precio: null },
-  { cat: '🍞 Pan', nombre: 'Trenzas 1/4',      precio: null },
+  { cat: '🍞 Pan', nombre: 'Biscochitos 1/4',  precio: 1200 },
+  { cat: '🍞 Pan', nombre: 'Pepas batata x 8 mayorista',     precio: 1760 },
+  { cat: '🍞 Pan', nombre: 'Pepas batata x 8',     precio: 2400 },
+  { cat: '🍞 Pan', nombre: 'Pepas membrillo x 8 mayorista',     precio: 1760 },
+  { cat: '🍞 Pan', nombre: 'Pepas membrillo x 8',     precio: 2400 },
 ];
+
+// Catálogo dinámico = base + personalizados guardados en state.catalogo
+function getCatalogo() {
+  const custom = (state.catalogo || []).map(c => ({
+    cat: c.cat || '✨ Mis productos',
+    nombre: c.nombre,
+    precio: c.precio || null,
+    custom: true,
+  }));
+  // Evitar duplicados: si ya existe en base, no agregar de custom
+  const baseNombres = new Set(CATALOGO_BASE.map(p => p.nombre.toLowerCase()));
+  const soloNuevos = custom.filter(c => !baseNombres.has(c.nombre.toLowerCase()));
+  return [...CATALOGO_BASE, ...soloNuevos];
+}
+
+// Para usar en código que antes usaba CATALOGO directamente
+// (mantenemos compatibilidad usando función en lugar de constante)
+const CATALOGO = CATALOGO_BASE; // referencia para backward compat donde se necesite
+
+/* ============================================================
+   CATÁLOGO DE PRODUCTOS
+============================================================ */
+
+// Categorías disponibles
+const CATS_DISPONIBLES = [
+  '🍪 Alfajores',
+  '🥐 Churros — por unidad',
+  '🥐 Churros — por media docena',
+  '🥐 Churros — por docena',
+  '🎂 Tortas',
+  '🍞 Pan',
+  '✨ Mis productos',
+];
+
+function openCatalogo() {
+  openModal(`
+    <div class="modal-title">🛒 Catálogo de productos</div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
+      <button class="btn btn-primary btn-sm" onclick="openProductoForm(null)">+ Nuevo producto</button>
+    </div>
+    <div id="catalogo-lista"></div>
+    <div style="margin-top:16px;padding:10px 12px;background:var(--surface2);border-radius:var(--radius-sm);border:1px solid var(--border);font-size:11px;color:var(--text3)">
+      📌 Los productos del catálogo base no se pueden editar ni eliminar. Solo podés editar los que agregaste vos (✨ Mis productos).
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button>
+    </div>
+  `);
+  setTimeout(() => renderCatalogoLista(), 50);
+}
+
+function renderCatalogoLista() {
+  const el = document.getElementById('catalogo-lista');
+  if (!el) return;
+
+  const cat = getCatalogo();
+  // Agrupar por categoría
+  const grupos = {};
+  cat.forEach(p => {
+    if (!grupos[p.cat]) grupos[p.cat] = [];
+    grupos[p.cat].push(p);
+  });
+
+  let html = '';
+  Object.entries(grupos).forEach(([catNombre, items]) => {
+    html += `<div style="font-size:11px;font-weight:700;color:var(--accent);letter-spacing:.5px;text-transform:uppercase;padding:8px 0 4px;border-bottom:1px solid var(--border);margin-bottom:6px">${catNombre}</div>`;
+    items.forEach(item => {
+      const esCustom = item.custom || false;
+      const precioStr = item.precio
+        ? `<span style="font-weight:700;color:var(--accent)">$${Number(item.precio).toLocaleString('es-AR')}</span>`
+        : `<span style="color:var(--text3);font-size:11px">Sin precio fijo</span>`;
+      html += `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;color:var(--text)">${item.nombre}</div>
+            <div style="margin-top:2px">${precioStr}</div>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0;margin-left:8px">
+            ${esCustom
+              ? `<button class="btn btn-ghost btn-sm" onclick="openProductoForm('${item.nombre.replace(/'/g,"\\'")}')">✏️</button>
+                 <button class="btn btn-danger btn-sm" onclick="confirmEliminarProducto('${item.nombre.replace(/'/g,"\\'")}')">🗑</button>`
+              : `<button class="btn btn-ghost btn-sm" onclick="openProductoFormEditar('${item.nombre.replace(/'/g,"\\'")}', ${item.precio || 'null'}, '${item.cat.replace(/'/g,"\\'")}')">✏️ precio</button>`
+            }
+          </div>
+        </div>`;
+    });
+    html += '<div style="height:8px"></div>';
+  });
+
+  el.innerHTML = html || '<div class="empty-state"><p>Sin productos</p></div>';
+}
+
+function openProductoForm(nombreExistente) {
+  const p = nombreExistente
+    ? (state.catalogo || []).find(x => x.nombre === nombreExistente)
+    : null;
+
+  const catsOpts = CATS_DISPONIBLES.map(c =>
+    `<option value="${c}" ${(p?.cat || '✨ Mis productos') === c ? 'selected' : ''}>${c}</option>`
+  ).join('');
+
+  openModal(`
+    <div class="modal-title">${p ? 'Editar producto' : 'Nuevo producto'}</div>
+    <div class="form-group">
+      <label class="form-label">Nombre *</label>
+      <input class="form-input" id="f-prod-nombre" type="text"
+        placeholder="Ej: Torta de chocolate" value="${p?.nombre || ''}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Precio ($) <span style="font-weight:400;color:var(--text3)">(opcional)</span></label>
+      <input class="form-input" id="f-prod-precio" type="text" inputmode="decimal"
+        placeholder="Ej: 15.000" value="${p?.precio || ''}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Categoría</label>
+      <select class="form-input" id="f-prod-cat">${catsOpts}</select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="openCatalogo()">← Volver</button>
+      <button class="btn btn-primary w-100" onclick="saveProductoCatalogo('${nombreExistente || ''}')">💾 Guardar</button>
+    </div>
+  `);
+}
+
+// Editar precio de un producto BASE (se guarda en state.catalogo como override)
+function openProductoFormEditar(nombre, precioActual, cat) {
+  openModal(`
+    <div class="modal-title">✏️ Editar precio</div>
+    <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px">${nombre}</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:16px">${cat}</div>
+    <div class="form-group">
+      <label class="form-label">Nuevo precio ($)</label>
+      <input class="form-input" id="f-prod-precio-base" type="text" inputmode="decimal"
+        placeholder="Ej: 15.000" value="${precioActual || ''}">
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:14px;padding:8px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+      💡 Este cambio actualiza el precio que aparece en el catálogo al crear pedidos.
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="openCatalogo()">← Volver</button>
+      <button class="btn btn-primary w-100" onclick="savePrecioProductoBase('${nombre.replace(/'/g,"\\'")}', '${cat.replace(/'/g,"\\'")}')">💾 Guardar precio</button>
+    </div>
+  `);
+}
+
+function savePrecioProductoBase(nombre, cat) {
+  const precio = parsePrecio(document.getElementById('f-prod-precio-base')?.value);
+  if (!precio || precio <= 0) { showToast('⚠️ Ingresá un precio válido'); return; }
+
+  state.catalogo = state.catalogo || [];
+  // Buscar si ya existe un override para este producto
+  const idx = state.catalogo.findIndex(x => x.nombre === nombre);
+  if (idx >= 0) {
+    state.catalogo[idx].precio = precio;
+  } else {
+    // Crear un override en state.catalogo (marcado como custom para poder editarlo)
+    state.catalogo.push({ nombre, precio, cat, custom: true });
+  }
+  // Actualizar también en CATALOGO_BASE si existe
+  const baseIdx = CATALOGO_BASE.findIndex(x => x.nombre === nombre);
+  if (baseIdx >= 0) CATALOGO_BASE[baseIdx].precio = precio;
+
+  saveState();
+  showToast(`✅ Precio de "${nombre}" actualizado a $${precio.toLocaleString('es-AR')}`);
+  openCatalogo();
+}
+
+function saveProductoCatalogo(nombreAnterior) {
+  const nombre = document.getElementById('f-prod-nombre')?.value.trim();
+  const precioRaw = document.getElementById('f-prod-precio')?.value;
+  const precio = precioRaw ? parsePrecio(precioRaw) : null;
+  const cat = document.getElementById('f-prod-cat')?.value || '✨ Mis productos';
+
+  if (!nombre) { showToast('⚠️ Escribí un nombre'); return; }
+
+  state.catalogo = state.catalogo || [];
+
+  if (nombreAnterior) {
+    // Editar existente
+    const idx = state.catalogo.findIndex(x => x.nombre === nombreAnterior);
+    if (idx >= 0) {
+      state.catalogo[idx] = { nombre, precio: precio || null, cat, custom: true };
+    }
+    showToast('✏️ Producto actualizado');
+  } else {
+    // Verificar que no exista ya
+    const yaExiste = getCatalogo().some(p => p.nombre.toLowerCase() === nombre.toLowerCase());
+    if (yaExiste) { showToast('⚠️ Ya existe un producto con ese nombre'); return; }
+    state.catalogo.push({ nombre, precio: precio || null, cat, custom: true });
+    showToast('✨ Producto agregado al catálogo');
+  }
+
+  saveState();
+  openCatalogo();
+}
+
+function confirmEliminarProducto(nombre) {
+  showConfirm('¿Eliminar producto?', `Se eliminará "${nombre}" del catálogo.`, () => {
+    state.catalogo = (state.catalogo || []).filter(x => x.nombre !== nombre);
+    saveState();
+    showToast('🗑 Producto eliminado');
+    openCatalogo();
+  });
+}
 
 // Items temporales del pedido en edición
 let _pedidoItems = [];
@@ -1601,16 +1852,18 @@ function renderItemsList() {
     return;
   }
   const total = _pedidoItems.reduce((s, i) => s + i.subtotal, 0);
-  el.innerHTML = _pedidoItems.map((item, idx) => `
+  el.innerHTML = _pedidoItems.map((item, idx) => {
+    const tieneReceta = state.recetas.some(r => r.producto === item.producto);
+    return `
     <div class="item-row">
       <div class="item-row-info">
-        <div class="item-row-name">${item.producto}</div>
-        <div class="item-row-detail">x${item.cantidad} · $${item.precioUnit} c/u</div>
+        <div class="item-row-name">${item.producto} ${tieneReceta ? '<span title="Tiene receta — descontará stock" style="font-size:11px;color:var(--accent)">📋</span>' : ''}</div>
+        <div class="item-row-detail">x${item.cantidad} · $${item.precioUnit} c/u${tieneReceta ? ' · <span style="color:var(--accent);font-size:11px">descuenta stock</span>' : ''}</div>
       </div>
       <div class="item-row-price">$${item.subtotal.toLocaleString('es-AR')}</div>
       <button class="item-row-del" onclick="quitarItemPedido(${idx})">✕</button>
     </div>
-  `).join('') + `
+  `}).join('') + `
     <div class="total-row">
       <span>Total</span>
       <span>$${total.toLocaleString('es-AR')}</span>
@@ -1623,6 +1876,15 @@ function agregarItemPedido() {
   const precioUnit = parsePrecio(document.getElementById('f-precio-unit')?.value);
   if (!prod) { showToast('⚠️ Escribí un producto'); return; }
   if (!precioUnit) { showToast('⚠️ Ingresá el precio unitario'); return; }
+
+  // Si el producto es nuevo, guardarlo en el catálogo
+  const eraDesconocido = !getCatalogo().some(p => p.nombre.toLowerCase() === prod.toLowerCase());
+  if (eraDesconocido) {
+    agregarProductoAlCatalogoSiEsNuevo(prod, precioUnit);
+    saveState(); // guardar catálogo actualizado
+    showToast(`✨ "${prod}" guardado en tu catálogo`);
+  }
+
   _pedidoItems.push({ producto: prod, cantidad: cant, precioUnit, subtotal: cant * precioUnit });
   // Limpiar campos
   document.getElementById('f-producto').value = '';
@@ -1769,16 +2031,13 @@ function initProductoAutocomplete() {
   }
 
   function renderDropdown(query) {
+    const catalogoActual = getCatalogo();
     const q = query.trim().toLowerCase();
     const matches = q
-      ? CATALOGO.filter(p => p.nombre.toLowerCase().includes(q) || p.cat.toLowerCase().includes(q))
-      : CATALOGO;
+      ? catalogoActual.filter(p => p.nombre.toLowerCase().includes(q) || p.cat.toLowerCase().includes(q))
+      : catalogoActual;
 
-    if (matches.length === 0) {
-      dropdown.innerHTML = '<div style="padding:12px 14px;font-size:13px;color:var(--text3)">Sin resultados</div>';
-      dropdown.classList.add('open');
-      return;
-    }
+    const exactMatch = catalogoActual.some(p => p.nombre.toLowerCase() === q);
 
     // Agrupar por categoría
     const cats = {};
@@ -1792,12 +2051,29 @@ function initProductoAutocomplete() {
       html += `<div class="prod-cat">${cat}</div>`;
       items.forEach(item => {
         const precioStr = item.precio ? `$${item.precio.toLocaleString('es-AR')} c/u` : '';
-        html += `<div class="prod-option" data-nombre="${item.nombre}" data-precio="${item.precio||''}">
+        html += `<div class="prod-option" data-nombre="${item.nombre.replace(/"/g,'&quot;')}" data-precio="${item.precio||''}">
           <span>${highlight(item.nombre, q)}</span>
           ${precioStr ? `<span class="prod-precio">${precioStr}</span>` : '<span class="prod-precio" style="color:var(--text3);font-weight:400">Ingresar precio</span>'}
         </div>`;
       });
     });
+
+    // Opción de agregar nuevo si no hay match exacto y hay texto
+    if (q && !exactMatch) {
+      const nombreNuevo = query.trim();
+      html += `<div class="prod-cat">✨ Nuevo producto</div>
+        <div class="prod-option" data-nombre="${nombreNuevo.replace(/"/g,'&quot;')}" data-precio="" data-nuevo="true"
+          style="color:var(--accent);font-weight:600">
+          <span>➕ Agregar "${nombreNuevo}" al catálogo</span>
+          <span class="prod-precio" style="color:var(--text3);font-weight:400">nuevo</span>
+        </div>`;
+    }
+
+    if (!html) {
+      dropdown.innerHTML = '<div style="padding:12px 14px;font-size:13px;color:var(--text3)">Sin resultados</div>';
+      dropdown.classList.add('open');
+      return;
+    }
 
     dropdown.innerHTML = html;
     dropdown.classList.add('open');
@@ -1806,12 +2082,21 @@ function initProductoAutocomplete() {
       opt.addEventListener('mousedown', (e) => {
         e.preventDefault();
         input.value = opt.dataset.nombre;
-        setPrecioUnitario(opt.dataset.precio);
-        dropdown.classList.remove('open');
-        // Si no tiene precio fijo, enfocar el campo precio
-        if (!opt.dataset.precio) {
+        // Si es nuevo, agregarlo al catálogo y mostrar mensaje en hint
+        if (opt.dataset.nuevo === 'true') {
+          agregarProductoAlCatalogoSiEsNuevo(opt.dataset.nombre, null);
+          saveState();
+          const hint = document.getElementById('f-precio-hint');
+          if (hint) hint.textContent = '✨ Producto guardado en tu catálogo';
           setTimeout(() => { precioEl.focus(); precioEl.select(); }, 50);
+        } else {
+          setPrecioUnitario(opt.dataset.precio);
+          // Si no tiene precio fijo, enfocar el campo precio
+          if (!opt.dataset.precio) {
+            setTimeout(() => { precioEl.focus(); precioEl.select(); }, 50);
+          }
         }
+        dropdown.classList.remove('open');
       });
     });
   }
@@ -1819,7 +2104,8 @@ function initProductoAutocomplete() {
   input.addEventListener('focus', () => renderDropdown(input.value));
   input.addEventListener('input', () => {
     // Al escribir libremente, buscar si coincide exactamente con un producto del catálogo
-    const match = CATALOGO.find(p => p.nombre.toLowerCase() === input.value.trim().toLowerCase());
+    const catAct = getCatalogo();
+    const match = catAct.find(p => p.nombre.toLowerCase() === input.value.trim().toLowerCase());
     setPrecioUnitario(match ? match.precio : null);
     renderDropdown(input.value);
   });
@@ -1854,11 +2140,19 @@ function savePedido(id) {
   if (id) {
     const idx = state.pedidos.findIndex(p => p.id === id);
     state.pedidos[idx] = { ...state.pedidos[idx], ...data };
+    saveState(); closeModal();
+    showToast('✏️ Pedido actualizado');
   } else {
     state.pedidos.push({ id: nextId(), ...data });
+    // Descontar materia prima según recetas
+    const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
+    saveState(); closeModal();
+    if (descuentos.length > 0) {
+      showToast('📦 Pedido creado · 🧂 ' + descuentos.slice(0, 3).join(', ') + (descuentos.length > 3 ? ' y más...' : ''));
+    } else {
+      showToast('📦 Pedido creado');
+    }
   }
-  saveState(); closeModal();
-  showToast(id ? '✏️ Pedido actualizado' : '📦 Pedido creado');
   renderScreen(activeScreen);
   // Esperar un tick para que el SW esté listo antes de programar
   if (Notification.permission === 'granted') {
@@ -1883,11 +2177,10 @@ function renderStock() {
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div class="section-title" style="margin-bottom:0">Materia Prima</div>
+      <div class="section-sub" style="margin-bottom:0">🧂 Ingredientes · Stock general: ${pct}%</div>
       <button class="btn btn-primary btn-sm" onclick="openIngredienteForm(null)">+ Ingrediente</button>
     </div>
-    <div class="section-sub">Stock general: ${pct}%</div>
-    <div class="card mb-12">
+    <div class="card mb-12" style="margin-top:10px">
       <div class="progress-wrap">
         <div class="progress-bar ${stockColor(pct)}" style="width:${pct}%"></div>
       </div>
@@ -1901,10 +2194,21 @@ function renderStock() {
 
     <div style="height:16px"></div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div class="section-title" style="margin-bottom:0">📋 Papelería</div>
+      <div class="section-title" style="margin-bottom:0;font-size:16px">📋 Ingredientes por producto</div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-ghost btn-sm" onclick="openCatalogo()">🛒 Productos</button>
+        <button class="btn btn-primary btn-sm" onclick="openRecetaForm(null)">+ Receta</button>
+      </div>
+    </div>
+    <div class="section-sub">Se descuentan automáticamente en Materia prima al crear un pedido</div>
+    ${renderRecetasList()}
+
+    <div style="height:16px"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div class="section-title" style="margin-bottom:0;font-size:16px">📋 Papelería · ${pap}%</div>
       <button class="btn btn-primary btn-sm" onclick="openPapeleriaForm(null)">+ Artículo</button>
     </div>
-    <div class="section-sub">Stock de papelería: ${pap}%</div>
+    <div class="section-sub">Cajas, bolsas, stickers y otros materiales de empaque</div>
     <div class="card mb-12">
       <div class="progress-wrap">
         <div class="progress-bar ${stockColor(pap)}" style="width:${pap}%"></div>
@@ -2074,6 +2378,324 @@ function confirmEliminarIngrediente(id) {
 
 // Autocomplete en campo "Nombre" del formulario de ingrediente
 // Sugiere ingredientes YA existentes para evitar duplicados y facilitar edición
+
+/* -------- RECETAS -------- */
+
+// Solo productos del catálogo que tienen precio
+// Catálogo con precio (para recetas): base + custom, solo con precio definido
+function getCatalogoConPrecio() {
+  return getCatalogo().filter(p => p.precio !== null);
+}
+
+function renderRecetasList() {
+  if (state.recetas.length === 0) {
+    return `<div class="empty-state" style="padding:20px 0"><div class="empty-icon">📋</div><p>Sin recetas. Tocá + para agregar.</p></div>`;
+  }
+  return state.recetas.map(r => {
+    const ings = r.ingredientes || [];
+    const listHtml = ings.length > 0
+      ? `<ul class="receta-ing-list">${ings.map(i => {
+          const ing = state.ingredientes.find(x => x.id === i.ingId);
+          return `<li><span>${ing ? ing.nombre : '(eliminado)'}</span><span>${i.cantidad} ${ing ? ing.unidad : ''}</span></li>`;
+        }).join('')}</ul>`
+      : `<div style="font-size:12px;color:var(--text3);margin-bottom:8px">Sin ingredientes cargados aún</div>`;
+    return `
+      <div class="receta-card">
+        <div class="receta-card-header">
+          <div class="receta-card-nombre">${r.producto}</div>
+          <div class="receta-card-rinde">Rinde: ${r.rinde} ${r.unidadRinde}</div>
+        </div>
+        ${listHtml}
+        <div class="receta-actions">
+          <button class="btn btn-ghost btn-sm" onclick="openRecetaForm(${r.id})">✏️ Editar</button>
+          <button class="btn btn-danger btn-sm" onclick="confirmEliminarReceta(${r.id})">🗑</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// _recetaItems: lista de { ingId, cantidad } en edición
+let _recetaItems = [];
+
+function openRecetaForm(id) {
+  const r = id ? state.recetas.find(x => x.id === id) : null;
+  _recetaItems = r?.ingredientes ? JSON.parse(JSON.stringify(r.ingredientes)) : [];
+
+  const unidadesRinde = ['g','kg','un','docena','1/4 kg','1/2 kg'];
+  const unidadOpts = unidadesRinde.map(u => `<option value="${u}" ${r?.unidadRinde === u ? 'selected' : ''}>${u}</option>`).join('');
+
+  openModal(`
+    <div class="modal-title">${r ? 'Editar receta' : 'Nueva receta'}</div>
+    <div class="form-group">
+      <label class="form-label">Producto *</label>
+      <div class="cliente-wrap">
+        <input class="form-input" id="f-rec-producto" type="text"
+          placeholder="Escribí o elegí un producto..."
+          value="${r?.producto || ''}"
+          autocomplete="off">
+        <div class="cliente-dropdown" id="rec-prod-dropdown"></div>
+      </div>
+      <div id="rec-prod-nuevo-aviso" style="display:none;margin-top:6px;padding:8px 12px;background:var(--accent-light);border-radius:8px;font-size:12px;color:var(--accent);border:1px solid var(--border)">
+        ✨ Producto nuevo — se guardará en tu catálogo cuando guardes la receta
+      </div>
+    </div>
+    <div class="flex gap-8" style="margin-bottom:14px">
+      <div style="flex:1">
+        <label class="form-label">Cantidad que rinde *</label>
+        <input class="form-input" id="f-rec-rinde" type="number" min="0.01" step="0.01" value="${r?.rinde || ''}">
+      </div>
+      <div style="flex:1">
+        <label class="form-label">Unidad</label>
+        <select class="form-input" id="f-rec-unidad-rinde">
+          ${unidadOpts}
+        </select>
+      </div>
+    </div>
+
+    <div class="form-label" style="margin-bottom:6px">Ingredientes de la receta</div>
+    <div id="receta-items-list"></div>
+
+    <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px;border:1px solid var(--border);margin-bottom:14px">
+      <div class="form-label" style="margin-bottom:8px">Agregar ingrediente</div>
+      <div class="flex gap-8" style="margin-bottom:8px">
+        <div style="flex:2">
+          <label class="form-label">Materia prima</label>
+          <select class="form-input" id="f-rec-ing">
+            <option value="">— Elegir —</option>
+            ${state.ingredientes.map(i => `<option value="${i.id}">${i.nombre} (${i.unidad})</option>`).join('')}
+          </select>
+        </div>
+        <div style="flex:1">
+          <label class="form-label">Cantidad</label>
+          <input class="form-input" id="f-rec-cant" type="number" min="0.001" step="0.001" placeholder="0">
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-full" onclick="agregarIngReceta()">+ Agregar ingrediente</button>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="saveReceta(${id || 'null'})">💾 Guardar receta</button>
+    </div>
+  `);
+  setTimeout(() => {
+    renderRecetaItemsList();
+    initRecetaProductoAutocomplete();
+  }, 50);
+}
+
+function renderRecetaItemsList() {
+  const el = document.getElementById('receta-items-list');
+  if (!el) return;
+  if (_recetaItems.length === 0) {
+    el.innerHTML = '<div style="font-size:12px;color:var(--text3);margin-bottom:8px">Sin ingredientes aún</div>';
+    return;
+  }
+  el.innerHTML = _recetaItems.map((item, idx) => {
+    const ing = state.ingredientes.find(x => x.id === item.ingId);
+    return `
+      <div class="item-row">
+        <div class="item-row-info">
+          <div class="item-row-name">${ing ? ing.nombre : '(eliminado)'}</div>
+          <div class="item-row-detail">${item.cantidad} ${ing ? ing.unidad : ''}</div>
+        </div>
+        <button class="item-row-del" onclick="quitarIngReceta(${idx})">✕</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function agregarIngReceta() {
+  const ingId = parseInt(document.getElementById('f-rec-ing').value);
+  const cant = parseFloat(document.getElementById('f-rec-cant').value);
+  if (!ingId) { showToast('⚠️ Elegí un ingrediente'); return; }
+  if (!cant || cant <= 0) { showToast('⚠️ Ingresá una cantidad válida'); return; }
+  // No duplicar el mismo ingrediente
+  if (_recetaItems.find(x => x.ingId === ingId)) {
+    showToast('⚠️ Ese ingrediente ya está en la receta'); return;
+  }
+  _recetaItems.push({ ingId, cantidad: cant });
+  document.getElementById('f-rec-ing').value = '';
+  document.getElementById('f-rec-cant').value = '';
+  renderRecetaItemsList();
+}
+
+function quitarIngReceta(idx) {
+  _recetaItems.splice(idx, 1);
+  renderRecetaItemsList();
+}
+
+function initRecetaProductoAutocomplete() {
+  const input    = document.getElementById('f-rec-producto');
+  const dropdown = document.getElementById('rec-prod-dropdown');
+  const aviso    = document.getElementById('rec-prod-nuevo-aviso');
+  if (!input || !dropdown) return;
+
+  function normalizar(s) {
+    return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  }
+  function highlight(text, q) {
+    if (!q) return text;
+    const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
+    return text.replace(re, '<mark>$1</mark>');
+  }
+
+  function renderDrop(val) {
+    const cat = getCatalogo();
+    const q = normalizar(val.trim());
+    if (!val.trim()) { dropdown.classList.remove('open'); if (aviso) aviso.style.display = 'none'; return; }
+
+    const matches = q ? cat.filter(p => normalizar(p.nombre).includes(q)) : cat;
+    const exactMatch = cat.some(p => normalizar(p.nombre) === q);
+
+    let html = '';
+    if (matches.length > 0) {
+      // Agrupar por categoría
+      const grupos = {};
+      matches.forEach(p => {
+        if (!grupos[p.cat]) grupos[p.cat] = [];
+        grupos[p.cat].push(p);
+      });
+      Object.entries(grupos).forEach(([cat, items]) => {
+        html += `<div class="prod-cat">${cat}</div>`;
+        items.forEach(item => {
+          const precioStr = item.precio ? `$${item.precio.toLocaleString('es-AR')}` : 'Sin precio';
+          html += `<div class="prod-option" data-nombre="${item.nombre.replace(/"/g,'&quot;')}" data-custom="${item.custom||''}">
+            <span>${highlight(item.nombre, q)}</span>
+            <span class="prod-precio">${precioStr}</span>
+          </div>`;
+        });
+      });
+    }
+
+    // Opción de agregar nuevo si no hay match exacto
+    if (!exactMatch && val.trim()) {
+      html += `<div class="prod-cat">✨ Nuevo producto</div>
+        <div class="prod-option" data-nombre="${val.trim().replace(/"/g,'&quot;')}" data-nuevo="true"
+          style="color:var(--accent);font-weight:600">
+          <span>➕ Agregar "${val.trim()}" al catálogo</span>
+          <span class="prod-precio" style="color:var(--text3)">nuevo</span>
+        </div>`;
+    }
+
+    if (!html) { dropdown.classList.remove('open'); return; }
+    dropdown.innerHTML = html;
+    dropdown.classList.add('open');
+
+    // Mostrar/ocultar aviso de producto nuevo
+    if (aviso) aviso.style.display = !exactMatch && val.trim() ? 'block' : 'none';
+
+    dropdown.querySelectorAll('.prod-option').forEach(opt => {
+      opt.addEventListener('mousedown', e => {
+        e.preventDefault();
+        input.value = opt.dataset.nombre;
+        dropdown.classList.remove('open');
+        // Si es nuevo, mostrar aviso; si ya existe, ocultarlo
+        const esNuevo = opt.dataset.nuevo === 'true';
+        if (aviso) aviso.style.display = esNuevo ? 'block' : 'none';
+        setTimeout(() => document.getElementById('f-rec-rinde')?.focus(), 50);
+      });
+    });
+  }
+
+  input.addEventListener('input', () => renderDrop(input.value));
+  input.addEventListener('focus', () => renderDrop(input.value));
+  input.addEventListener('blur', () => setTimeout(() => {
+    dropdown.classList.remove('open');
+    // Verificar si es nuevo al perder foco
+    const val = input.value.trim();
+    const esNuevo = val && !getCatalogo().some(p => p.nombre.toLowerCase() === val.toLowerCase());
+    if (aviso) aviso.style.display = (val && esNuevo) ? 'block' : 'none';
+  }, 160));
+}
+
+/**
+ * Agrega un producto nuevo al catálogo personalizado si no existe.
+ * Se llama desde saveReceta y agregarItemPedido cuando el nombre no está en getCatalogo().
+ */
+function agregarProductoAlCatalogoSiEsNuevo(nombre, precio) {
+  if (!nombre) return;
+  const cat = getCatalogo();
+  const yaExiste = cat.some(p => p.nombre.toLowerCase() === nombre.toLowerCase());
+  if (yaExiste) return; // no duplicar
+  state.catalogo = state.catalogo || [];
+  state.catalogo.push({ nombre, precio: precio || null, cat: '✨ Mis productos' });
+  // No guardamos aquí separado — se guarda con saveState() del llamador
+}
+
+
+function saveReceta(id) {
+  const productoEl = document.getElementById('f-rec-producto');
+  const producto = productoEl ? productoEl.value.trim() : '';
+  const rinde = parseFloat(document.getElementById('f-rec-rinde').value);
+  const unidadRinde = document.getElementById('f-rec-unidad-rinde').value;
+  if (!producto) { showToast('⚠️ Escribí o elegí un producto'); return; }
+  if (!rinde || rinde <= 0) { showToast('⚠️ Ingresá la cantidad que rinde'); return; }
+  if (_recetaItems.length === 0) { showToast('⚠️ Agregá al menos un ingrediente'); return; }
+
+  // Guardar al catálogo si es un producto nuevo
+  const eraDesconocido = !getCatalogo().some(p => p.nombre.toLowerCase() === producto.toLowerCase());
+  agregarProductoAlCatalogoSiEsNuevo(producto, null);
+
+  const data = { producto, rinde, unidadRinde, ingredientes: [..._recetaItems] };
+
+  if (id) {
+    const idx = state.recetas.findIndex(r => r.id === id);
+    state.recetas[idx] = { ...state.recetas[idx], ...data };
+    showToast('✏️ Receta actualizada' + (eraDesconocido ? ' · ✨ Producto guardado en catálogo' : ''));
+  } else {
+    // Si ya existe receta para ese producto, reemplazar
+    const existing = state.recetas.findIndex(r => r.producto === producto);
+    if (existing >= 0) {
+      state.recetas[existing] = { ...state.recetas[existing], ...data };
+      showToast('✏️ Receta actualizada' + (eraDesconocido ? ' · ✨ Producto guardado en catálogo' : ''));
+    } else {
+      state.recetas.push({ id: nextId(), ...data });
+      showToast('📋 Receta guardada' + (eraDesconocido ? ' · ✨ Producto guardado en catálogo' : ''));
+    }
+  }
+  saveState();
+  closeModal();
+  renderScreen(activeScreen);
+}
+
+function confirmEliminarReceta(id) {
+  const r = state.recetas.find(x => x.id === id);
+  showConfirm('¿Eliminar receta?', `Se eliminará la receta de "${r.producto}".`, () => {
+    state.recetas = state.recetas.filter(x => x.id !== id);
+    saveState(); closeModal();
+    showToast('Receta eliminada');
+    renderStock();
+  });
+}
+
+/**
+ * Descuenta materia prima al crear un pedido nuevo.
+ * Para cada item del pedido, busca si tiene receta y descuenta
+ * proporcionalmente según la cantidad vendida vs la cantidad que rinde la receta.
+ * Devuelve un resumen de lo descontado para el toast.
+ */
+function descontarMateriaPrimaByPedido(items) {
+  const descuentos = [];
+  items.forEach(item => {
+    const receta = state.recetas.find(r => r.producto === item.producto);
+    if (!receta || !receta.ingredientes || receta.ingredientes.length === 0) return;
+
+    // Factor = cuántas "recetas completas" se necesitan para este item
+    // La receta rinde `receta.rinde` unidades; el pedido pide `item.cantidad`
+    const factor = item.cantidad / receta.rinde;
+
+    receta.ingredientes.forEach(ri => {
+      const ing = state.ingredientes.find(x => x.id === ri.ingId);
+      if (!ing) return;
+      const cantDescontar = Math.round(ri.cantidad * factor * 1000) / 1000;
+      ing.stock = Math.max(0, Math.round((ing.stock - cantDescontar) * 1000) / 1000);
+      descuentos.push(`${ing.nombre}: -${cantDescontar} ${ing.unidad}`);
+    });
+  });
+  return descuentos;
+}
 
 /* -------- PAPELERÍA -------- */
 function openSumarPapeleria(id) {
@@ -2333,8 +2955,7 @@ function renderFinanzas() {
   }
 
   el.innerHTML = `
-    <div class="section-title">Finanzas</div>
-    <div class="section-sub">Resumen financiero</div>
+    <div class="section-sub" style="margin-bottom:12px">Resumen de tus ingresos y egresos</div>
     <div class="summary-grid">
       <div class="summary-card">
         <div class="label">Saldo</div>
@@ -2634,10 +3255,10 @@ function renderNotas() {
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div class="section-title" style="margin-bottom:0">Anotaciones</div>
+      <div class="section-sub" style="margin-bottom:0">${state.notas.length} nota${state.notas.length !== 1 ? 's' : ''} guardada${state.notas.length !== 1 ? 's' : ''}</div>
       <button class="btn btn-primary btn-sm" onclick="openNotaForm(null)">+ Nueva nota</button>
     </div>
-    <div class="section-sub">${state.notas.length} notas guardadas</div>
+    <div style="height:12px"></div>
     ${sorted.length === 0 ? `<div class="empty-state"><div class="empty-icon">📓</div><p>Sin notas aún. Tocá + para crear una.</p></div>` :
       `<div class="list-2col">${sorted.map(n => notaItem(n)).join('')}</div>`
     }
@@ -2740,8 +3361,7 @@ function renderClientes() {
   const clientes = getClientes();
 
   el.innerHTML = `
-    <div class="section-title">Clientes</div>
-    <div class="section-sub">${clientes.length} clientes registrados</div>
+    <div class="section-sub" style="margin-bottom:16px">${clientes.length} cliente${clientes.length !== 1 ? 's' : ''} registrado${clientes.length !== 1 ? 's' : ''} · ordenados por total gastado</div>
     ${clientes.length === 0
       ? `<div class="empty-state"><div class="empty-icon">👥</div><p>Aún no hay clientes registrados</p></div>`
       : `<div class="list-2col">${clientes.map(c => clienteCard(c)).join('')}</div>`

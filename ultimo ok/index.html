@@ -1530,8 +1530,6 @@ function confirmEliminarPedido(id) {
 const CATALOGO_BASE = [
   { cat: '🍪 Alfajores', nombre: 'Alfajor de maicena x12',           precio: 8000 },
   { cat: '🍪 Alfajores', nombre: 'Alfajor de maicena x24',           precio: 15500 },
-  { cat: '🍪 Alfajores', nombre: 'Alfajor de coco',                  precio: null },
-  { cat: '🍪 Alfajores', nombre: 'Alfajor de maicena c/chocolate',   precio: null },
   { cat: '🍪 Alfajores', nombre: 'Alfajor bon o bon',                precio: 3500 },
   { cat: '🍪 Alfajores', nombre: 'Alfajor dos corazones',            precio: 3500 },
   { cat: '🍪 Alfajores', nombre: 'Alfajor marplatense c/u',          precio: 1000 },
@@ -1554,15 +1552,10 @@ const CATALOGO_BASE = [
   { cat: '🎂 Tortas', nombre: 'Pastafrola bata 14 cm',   precio: 12000 },
   { cat: '🎂 Tortas', nombre: 'Pastafrola membrillo 14 cm', precio: 14000 },
   { cat: '🍞 Pan', nombre: 'Biscochitos 1/4',  precio: 1200 },
-  { cat: '🍞 Pan', nombre: 'Chipa 1/4',        precio: null },
-  { cat: '🍞 Pan', nombre: 'Chips de j/q',     precio: null },
-  { cat: '🍞 Pan', nombre: 'Libritos 1/4',     precio: null },
-  { cat: '🍞 Pan', nombre: 'Trenzas 1/4',      precio: null },
   { cat: '🍞 Pan', nombre: 'Pepas batata x 8 mayorista',     precio: 1760 },
   { cat: '🍞 Pan', nombre: 'Pepas batata x 8',     precio: 2400 },
   { cat: '🍞 Pan', nombre: 'Pepas membrillo x 8 mayorista',     precio: 1760 },
   { cat: '🍞 Pan', nombre: 'Pepas membrillo x 8',     precio: 2400 },
-  { cat: '🍞 Pan', nombre: 'Trenzas 1/4',      precio: null },
 ];
 
 // Catálogo dinámico = base + personalizados guardados en state.catalogo
@@ -1582,6 +1575,192 @@ function getCatalogo() {
 // Para usar en código que antes usaba CATALOGO directamente
 // (mantenemos compatibilidad usando función en lugar de constante)
 const CATALOGO = CATALOGO_BASE; // referencia para backward compat donde se necesite
+
+/* ============================================================
+   CATÁLOGO DE PRODUCTOS
+============================================================ */
+
+// Categorías disponibles
+const CATS_DISPONIBLES = [
+  '🍪 Alfajores',
+  '🥐 Churros — por unidad',
+  '🥐 Churros — por media docena',
+  '🥐 Churros — por docena',
+  '🎂 Tortas',
+  '🍞 Pan',
+  '✨ Mis productos',
+];
+
+function openCatalogo() {
+  openModal(`
+    <div class="modal-title">🛒 Catálogo de productos</div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
+      <button class="btn btn-primary btn-sm" onclick="openProductoForm(null)">+ Nuevo producto</button>
+    </div>
+    <div id="catalogo-lista"></div>
+    <div style="margin-top:16px;padding:10px 12px;background:var(--surface2);border-radius:var(--radius-sm);border:1px solid var(--border);font-size:11px;color:var(--text3)">
+      📌 Los productos del catálogo base no se pueden editar ni eliminar. Solo podés editar los que agregaste vos (✨ Mis productos).
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button>
+    </div>
+  `);
+  setTimeout(() => renderCatalogoLista(), 50);
+}
+
+function renderCatalogoLista() {
+  const el = document.getElementById('catalogo-lista');
+  if (!el) return;
+
+  const cat = getCatalogo();
+  // Agrupar por categoría
+  const grupos = {};
+  cat.forEach(p => {
+    if (!grupos[p.cat]) grupos[p.cat] = [];
+    grupos[p.cat].push(p);
+  });
+
+  let html = '';
+  Object.entries(grupos).forEach(([catNombre, items]) => {
+    html += `<div style="font-size:11px;font-weight:700;color:var(--accent);letter-spacing:.5px;text-transform:uppercase;padding:8px 0 4px;border-bottom:1px solid var(--border);margin-bottom:6px">${catNombre}</div>`;
+    items.forEach(item => {
+      const esCustom = item.custom || false;
+      const precioStr = item.precio
+        ? `<span style="font-weight:700;color:var(--accent)">$${Number(item.precio).toLocaleString('es-AR')}</span>`
+        : `<span style="color:var(--text3);font-size:11px">Sin precio fijo</span>`;
+      html += `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;color:var(--text)">${item.nombre}</div>
+            <div style="margin-top:2px">${precioStr}</div>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0;margin-left:8px">
+            ${esCustom
+              ? `<button class="btn btn-ghost btn-sm" onclick="openProductoForm('${item.nombre.replace(/'/g,"\\'")}')">✏️</button>
+                 <button class="btn btn-danger btn-sm" onclick="confirmEliminarProducto('${item.nombre.replace(/'/g,"\\'")}')">🗑</button>`
+              : `<button class="btn btn-ghost btn-sm" onclick="openProductoFormEditar('${item.nombre.replace(/'/g,"\\'")}', ${item.precio || 'null'}, '${item.cat.replace(/'/g,"\\'")}')">✏️ precio</button>`
+            }
+          </div>
+        </div>`;
+    });
+    html += '<div style="height:8px"></div>';
+  });
+
+  el.innerHTML = html || '<div class="empty-state"><p>Sin productos</p></div>';
+}
+
+function openProductoForm(nombreExistente) {
+  const p = nombreExistente
+    ? (state.catalogo || []).find(x => x.nombre === nombreExistente)
+    : null;
+
+  const catsOpts = CATS_DISPONIBLES.map(c =>
+    `<option value="${c}" ${(p?.cat || '✨ Mis productos') === c ? 'selected' : ''}>${c}</option>`
+  ).join('');
+
+  openModal(`
+    <div class="modal-title">${p ? 'Editar producto' : 'Nuevo producto'}</div>
+    <div class="form-group">
+      <label class="form-label">Nombre *</label>
+      <input class="form-input" id="f-prod-nombre" type="text"
+        placeholder="Ej: Torta de chocolate" value="${p?.nombre || ''}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Precio ($) <span style="font-weight:400;color:var(--text3)">(opcional)</span></label>
+      <input class="form-input" id="f-prod-precio" type="text" inputmode="decimal"
+        placeholder="Ej: 15.000" value="${p?.precio || ''}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Categoría</label>
+      <select class="form-input" id="f-prod-cat">${catsOpts}</select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="openCatalogo()">← Volver</button>
+      <button class="btn btn-primary w-100" onclick="saveProductoCatalogo('${nombreExistente || ''}')">💾 Guardar</button>
+    </div>
+  `);
+}
+
+// Editar precio de un producto BASE (se guarda en state.catalogo como override)
+function openProductoFormEditar(nombre, precioActual, cat) {
+  openModal(`
+    <div class="modal-title">✏️ Editar precio</div>
+    <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px">${nombre}</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:16px">${cat}</div>
+    <div class="form-group">
+      <label class="form-label">Nuevo precio ($)</label>
+      <input class="form-input" id="f-prod-precio-base" type="text" inputmode="decimal"
+        placeholder="Ej: 15.000" value="${precioActual || ''}">
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:14px;padding:8px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+      💡 Este cambio actualiza el precio que aparece en el catálogo al crear pedidos.
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="openCatalogo()">← Volver</button>
+      <button class="btn btn-primary w-100" onclick="savePrecioProductoBase('${nombre.replace(/'/g,"\\'")}', '${cat.replace(/'/g,"\\'")}')">💾 Guardar precio</button>
+    </div>
+  `);
+}
+
+function savePrecioProductoBase(nombre, cat) {
+  const precio = parsePrecio(document.getElementById('f-prod-precio-base')?.value);
+  if (!precio || precio <= 0) { showToast('⚠️ Ingresá un precio válido'); return; }
+
+  state.catalogo = state.catalogo || [];
+  // Buscar si ya existe un override para este producto
+  const idx = state.catalogo.findIndex(x => x.nombre === nombre);
+  if (idx >= 0) {
+    state.catalogo[idx].precio = precio;
+  } else {
+    // Crear un override en state.catalogo (marcado como custom para poder editarlo)
+    state.catalogo.push({ nombre, precio, cat, custom: true });
+  }
+  // Actualizar también en CATALOGO_BASE si existe
+  const baseIdx = CATALOGO_BASE.findIndex(x => x.nombre === nombre);
+  if (baseIdx >= 0) CATALOGO_BASE[baseIdx].precio = precio;
+
+  saveState();
+  showToast(`✅ Precio de "${nombre}" actualizado a $${precio.toLocaleString('es-AR')}`);
+  openCatalogo();
+}
+
+function saveProductoCatalogo(nombreAnterior) {
+  const nombre = document.getElementById('f-prod-nombre')?.value.trim();
+  const precioRaw = document.getElementById('f-prod-precio')?.value;
+  const precio = precioRaw ? parsePrecio(precioRaw) : null;
+  const cat = document.getElementById('f-prod-cat')?.value || '✨ Mis productos';
+
+  if (!nombre) { showToast('⚠️ Escribí un nombre'); return; }
+
+  state.catalogo = state.catalogo || [];
+
+  if (nombreAnterior) {
+    // Editar existente
+    const idx = state.catalogo.findIndex(x => x.nombre === nombreAnterior);
+    if (idx >= 0) {
+      state.catalogo[idx] = { nombre, precio: precio || null, cat, custom: true };
+    }
+    showToast('✏️ Producto actualizado');
+  } else {
+    // Verificar que no exista ya
+    const yaExiste = getCatalogo().some(p => p.nombre.toLowerCase() === nombre.toLowerCase());
+    if (yaExiste) { showToast('⚠️ Ya existe un producto con ese nombre'); return; }
+    state.catalogo.push({ nombre, precio: precio || null, cat, custom: true });
+    showToast('✨ Producto agregado al catálogo');
+  }
+
+  saveState();
+  openCatalogo();
+}
+
+function confirmEliminarProducto(nombre) {
+  showConfirm('¿Eliminar producto?', `Se eliminará "${nombre}" del catálogo.`, () => {
+    state.catalogo = (state.catalogo || []).filter(x => x.nombre !== nombre);
+    saveState();
+    showToast('🗑 Producto eliminado');
+    openCatalogo();
+  });
+}
 
 // Items temporales del pedido en edición
 let _pedidoItems = [];
@@ -2015,7 +2194,10 @@ function renderStock() {
     <div style="height:16px"></div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
       <div class="section-title" style="margin-bottom:0;font-size:16px">📋 Ingredientes por producto</div>
-      <button class="btn btn-primary btn-sm" onclick="openRecetaForm(null)">+ Receta</button>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-ghost btn-sm" onclick="openCatalogo()">🛒 Productos</button>
+        <button class="btn btn-primary btn-sm" onclick="openRecetaForm(null)">+ Receta</button>
+      </div>
     </div>
     <div class="section-sub">Se descuentan automáticamente en Materia prima al crear un pedido</div>
     ${renderRecetasList()}

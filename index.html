@@ -1619,17 +1619,36 @@ const CATALOGO_BASE = [
 
 // Catálogo dinámico = base + personalizados guardados en state.catalogo
 function getCatalogo() {
-  const custom = (state.catalogo || []).map(c => ({
-    cat: c.cat || '✨ Mis productos',
-    nombre: c.nombre,
-    precio: c.precio || null,
-    precioPorcion: c.precioPorcion || null,
-    custom: true,
-  }));
-  // Evitar duplicados: si ya existe en base, no agregar de custom
+  const overrides = state.catalogo || [];
+  const overrideMap = new Map(overrides.map(o => [o.nombre.toLowerCase(), o]));
+
+  // Aplicar overrides guardados a los productos base (precio actualizado)
+  const baseConOverride = CATALOGO_BASE.map(p => {
+    const ov = overrideMap.get(p.nombre.toLowerCase());
+    if (ov) {
+      return {
+        ...p,
+        precio: ov.precio !== undefined ? ov.precio : p.precio,
+        precioPorcion: ov.precioPorcion !== undefined ? ov.precioPorcion : (p.precioPorcion || null),
+      };
+    }
+    return p;
+  });
+
   const baseNombres = new Set(CATALOGO_BASE.map(p => p.nombre.toLowerCase()));
-  const soloNuevos = custom.filter(c => !baseNombres.has(c.nombre.toLowerCase()));
-  return [...CATALOGO_BASE, ...soloNuevos];
+
+  // Productos nuevos agregados por Sofi (no existen en la base)
+  const soloNuevos = overrides
+    .filter(c => !baseNombres.has(c.nombre.toLowerCase()))
+    .map(c => ({
+      cat: c.cat || '✨ Mis productos',
+      nombre: c.nombre,
+      precio: c.precio || null,
+      precioPorcion: c.precioPorcion || null,
+      custom: true,
+    }));
+
+  return [...baseConOverride, ...soloNuevos];
 }
 
 // Para usar en código que antes usaba CATALOGO directamente
@@ -1801,12 +1820,7 @@ function savePrecioProductoBase(nombre, cat) {
     // Crear un override en state.catalogo (marcado como custom para poder editarlo)
     state.catalogo.push({ nombre, precio, precioPorcion, cat, custom: true });
   }
-  // Actualizar también en CATALOGO_BASE si existe
-  const baseIdx = CATALOGO_BASE.findIndex(x => x.nombre === nombre);
-  if (baseIdx >= 0) {
-    CATALOGO_BASE[baseIdx].precio = precio;
-    CATALOGO_BASE[baseIdx].precioPorcion = precioPorcion;
-  }
+  
 
   saveState();
   showToast(`✅ Precio de "${nombre}" actualizado a $${precio.toLocaleString('es-AR')}${precioPorcion ? ' · porción $' + precioPorcion.toLocaleString('es-AR') : ''}`);

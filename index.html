@@ -1597,10 +1597,10 @@ const CATALOGO_BASE = [
   { cat: '🥐 Churros — por unidad', nombre: 'Churro DDL',            precio: 700 },
   { cat: '🥐 Churros — por unidad', nombre: 'Churro chocolate',      precio: 800 },
   { cat: '🥐 Churros — por unidad', nombre: 'Churro chocolate + DDL',precio: 1100 },
-  { cat: '🥐 Churros — por media docena', nombre: 'Docena churros simples',precio: 5500 },
-  { cat: '🥐 Churros — por media docena', nombre: 'Docena churros DDL',    precio: 8000 },
-  { cat: '🥐 Churros — por media docena', nombre: 'Docena churros chocolate', precio: 9500 },
-  { cat: '🥐 Churros — por media docena', nombre: 'Docena churros chocolate + DDL', precio: 13000 },
+  { cat: '🥐 Churros — por media docena', nombre: 'Media docena churros simples',precio: 3000 },
+  { cat: '🥐 Churros — por media docena', nombre: 'Media docena churros DDL',    precio: 4200 },
+  { cat: '🥐 Churros — por media docena', nombre: 'Media docena churros chocolate', precio: 4800 },
+  { cat: '🥐 Churros — por media docena', nombre: 'Media docena churros chocolate + DDL', precio: 6600 },
   { cat: '🥐 Churros — por docena', nombre: 'Docena churros simples',precio: 5500 },
   { cat: '🥐 Churros — por docena', nombre: 'Docena churros DDL',    precio: 8000 },
   { cat: '🥐 Churros — por docena', nombre: 'Docena churros chocolate', precio: 9500 },
@@ -2009,6 +2009,7 @@ function agregarItemPedido() {
   document.getElementById('f-precio-unit').value = '';
   document.getElementById('f-precio-hint').textContent = '';
   document.getElementById('f-presentacion').value = 'entera';
+  togglePresentacionWrap('');
   renderItemsList();
 }
 

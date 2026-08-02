@@ -947,6 +947,11 @@ let state = {
   notas: [],
   recetas: [],
   catalogo: [],   // productos personalizados agregados por Sofi
+  gastosFijos: [], // { id, nombre, monto, cadaXDias, tipo }
+  config: {
+    horasProductivasMes: 256, // martes a domingo, 8-14 y 16-19:30, ~27 días/mes
+    valorHora: 7200,          // convenio Ayudante Pastelero ($1.444.937 / 200hs), ajustable
+  },
   nextId: 1,
 };
 
@@ -994,6 +999,12 @@ async function saveNextId(id) {
   } catch(e) {}
 }
 
+async function saveConfig(config) {
+  try {
+    await db.collection('app').doc('config').set(config);
+  } catch(e) {}
+}
+
 function saveState() {
   saveCollection('pedidos', state.pedidos);
   saveCollection('ingredientes', state.ingredientes);
@@ -1002,7 +1013,9 @@ function saveState() {
   saveCollection('notas', state.notas);
   saveCollection('recetas', state.recetas);
   saveCollection('catalogo', state.catalogo);
+  saveCollection('gastosFijos', state.gastosFijos);
   saveNextId(state.nextId);
+  saveConfig(state.config);
   // Also save locally as backup
   localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
 }
@@ -1051,11 +1064,12 @@ async function loadFromFirebase() {
 
   // Luego intentar Firebase con timeout de 5 segundos
   const firebasePromise = (async () => {
-    const cols = ['pedidos','ingredientes','papeleria','movimientos','notas','recetas','catalogo'];
+    const cols = ['pedidos','ingredientes','papeleria','movimientos','notas','recetas','catalogo','gastosFijos'];
     const results = await Promise.all(
       cols.map(c => db.collection('app').doc(c).get())
     );
     const metaDoc = await db.collection('app').doc('meta').get();
+    const configDoc = await db.collection('app').doc('config').get();
 
     cols.forEach((c, i) => {
       if (results[i].exists) {
@@ -1066,6 +1080,10 @@ async function loadFromFirebase() {
     if (metaDoc.exists) {
       state.nextId = metaDoc.data().nextId || 1;
     }
+    if (configDoc.exists) {
+      state.config = { ...state.config, ...configDoc.data() };
+    }
+    seedDatosSofia();
     setSyncStatus('ok');
     renderScreen(activeScreen);
   })();
@@ -1082,9 +1100,37 @@ async function loadFromFirebase() {
   }
 }
 
+// Siembra los datos de costos que pasó Sofía (una sola vez, no duplica)
+function seedDatosSofia() {
+  let cambio = false;
+
+  state.gastosFijos = state.gastosFijos || [];
+  if (state.gastosFijos.length === 0) {
+    state.gastosFijos.push(
+      { id: nextId(), nombre: 'Gas', monto: 28000, cadaXDias: 35, tipo: 'gas' },
+      { id: nextId(), nombre: 'Papelería', monto: 20000, cadaXDias: 20, tipo: 'papeleria' },
+    );
+    cambio = true;
+  }
+
+  const churro = state.recetas.find(r => r.producto === 'Churro simple');
+  if (churro && churro.mermaPct === undefined) {
+    churro.mermaPct = Math.round((11 / 32) * 1000) / 10; // 34.4%
+    churro.mermaCadaXDias = 15;
+    cambio = true;
+  }
+
+  if (!state.config.valorHora) {
+    state.config.valorHora = 7200; // convenio Ayudante Pastelero, ajustable después
+    cambio = true;
+  }
+
+  if (cambio) saveState();
+}
+
 // Real-time listeners for live sync between devices
 function setupRealtimeSync() {
-  const cols = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo'];
+  const cols = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','gastosFijos'];
   cols.forEach(c => {
     db.collection('app').doc(c).onSnapshot(doc => {
       if (doc.exists) {
@@ -1854,12 +1900,26 @@ function renderItemsList() {
   }
   const total = _pedidoItems.reduce((s, i) => s + i.subtotal, 0);
   el.innerHTML = _pedidoItems.map((item, idx) => {
-    const tieneReceta = state.recetas.some(r => r.producto === item.producto);
+    const receta = state.recetas.find(r => r.producto === item.producto);
+    const tieneReceta = !!receta;
+    let margenHtml = '';
+    if (tieneReceta) {
+      const costo = calcularCostoReceta(receta);
+      if (costo && costo.costoRealUnit > 0) {
+        const margen = item.precioUnit - costo.costoRealUnit;
+        const margenPct = (margen / item.precioUnit) * 100;
+        const c = margenColor({ margenPct });
+        margenHtml = `<div style="font-size:11px;margin-top:2px">
+          <span style="color:${c.color};font-weight:600">Costo real: ${fmt(costo.costoRealUnit)} · Margen: ${margenPct.toFixed(0)}% (${c.label})</span>
+        </div>`;
+      }
+    }
     return `
     <div class="item-row">
       <div class="item-row-info">
         <div class="item-row-name">${item.producto} ${tieneReceta ? '<span title="Tiene receta — descontará stock" style="font-size:11px;color:var(--accent)">📋</span>' : ''}</div>
         <div class="item-row-detail">x${item.cantidad} · $${item.precioUnit} c/u${tieneReceta ? ' · <span style="color:var(--accent);font-size:11px">descuenta stock</span>' : ''}</div>
+        ${margenHtml}
       </div>
       <div class="item-row-price">$${item.subtotal.toLocaleString('es-AR')}</div>
       <button class="item-row-del" onclick="quitarItemPedido(${idx})">✕</button>
@@ -2221,7 +2281,148 @@ function renderStock() {
     ${sortedPap.length === 0
       ? `<div class="empty-state" style="padding:20px 0"><div class="empty-icon">📋</div><p>Sin artículos de papelería. Tocá + para agregar.</p></div>`
       : `<div class="list-2col">${sortedPap.map(i => ingredienteItem(i, 'pap')).join('')}</div>`}
+
+    <div style="height:16px"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div class="section-title" style="margin-bottom:0;font-size:16px">💸 Gastos fijos</div>
+      <button class="btn btn-primary btn-sm" onclick="openGastoFijoForm(null)">+ Gasto</button>
+    </div>
+    <div class="section-sub">Gas, papelería y otros gastos recurrentes, para prorratear en el costo real</div>
+    ${renderGastosFijosList()}
+
+    <div style="height:16px"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div class="section-title" style="margin-bottom:0;font-size:16px">📊 Costo real vs. precio</div>
+      <button class="btn btn-primary btn-sm" onclick="openCostosReales()">Ver márgenes</button>
+    </div>
+    <div class="section-sub">Compara el costo real de cada receta contra el precio de venta del catálogo</div>
+
+    <div style="height:16px"></div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title"><span class="card-icon">⚙️</span> Configuración de costos</div>
+        <button class="btn btn-ghost btn-sm" onclick="openConfigCostosForm()">✏️ Editar</button>
+      </div>
+      <div class="detail-row"><span class="label">Horas productivas / mes</span><span class="value">${state.config.horasProductivasMes} hs</span></div>
+      <div class="detail-row"><span class="label">Valor de tu hora</span><span class="value">${fmt(state.config.valorHora)}</span></div>
+    </div>
   `;
+}
+
+function renderGastosFijosList() {
+  if (!state.gastosFijos || state.gastosFijos.length === 0) {
+    return `<div class="empty-state" style="padding:20px 0"><div class="empty-icon">💸</div><p>Sin gastos fijos. Tocá + para agregar.</p></div>`;
+  }
+  return `<div class="list-2col">${state.gastosFijos.map(g => {
+    const mensual = Math.round((g.monto / g.cadaXDias) * 30);
+    return `
+      <div class="ingredient-item anim-in">
+        <div class="ingredient-header">
+          <div class="ingredient-name">${g.nombre}</div>
+          <span style="font-size:13px;font-weight:700;color:var(--accent)">${fmt(mensual)}/mes</span>
+        </div>
+        <div class="ingredient-amounts">${fmt(g.monto)} cada ${g.cadaXDias} días</div>
+        <div class="ingredient-actions">
+          <button class="btn btn-ghost btn-sm" onclick="openGastoFijoForm(${g.id})">✏️ Editar</button>
+          <button class="btn btn-danger btn-sm" onclick="confirmEliminarGastoFijo(${g.id})">🗑</button>
+        </div>
+      </div>`;
+  }).join('')}</div>`;
+}
+
+function openGastoFijoForm(id) {
+  const g = id ? state.gastosFijos.find(x => x.id === id) : null;
+  const tipos = [
+    { v: 'gas', l: '🔥 Gas' },
+    { v: 'papeleria', l: '📋 Papelería' },
+    { v: 'mantenimiento', l: '🔧 Mantenimiento' },
+    { v: 'otro', l: '💸 Otro' },
+  ];
+  const tipoOpts = tipos.map(t => `<option value="${t.v}" ${(g?.tipo||'otro')===t.v?'selected':''}>${t.l}</option>`).join('');
+  openModal(`
+    <div class="modal-title">${g ? 'Editar gasto fijo' : 'Nuevo gasto fijo'}</div>
+    <div class="form-group">
+      <label class="form-label">Nombre *</label>
+      <input class="form-input" id="f-gasto-nombre" type="text" placeholder="Ej: Gas" value="${g?.nombre||''}">
+    </div>
+    <div class="flex gap-8" style="margin-bottom:14px">
+      <div style="flex:1">
+        <label class="form-label">Monto ($) *</label>
+        <input class="form-input" id="f-gasto-monto" type="text" inputmode="decimal" placeholder="Ej: 28.000" value="${g?.monto||''}">
+      </div>
+      <div style="flex:1">
+        <label class="form-label">Cada cuántos días *</label>
+        <input class="form-input" id="f-gasto-dias" type="number" min="1" step="1" placeholder="Ej: 35" value="${g?.cadaXDias||''}">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Tipo</label>
+      <select class="form-input" id="f-gasto-tipo">${tipoOpts}</select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="saveGastoFijo(${id||'null'})">💾 Guardar</button>
+    </div>
+  `);
+}
+
+function saveGastoFijo(id) {
+  const nombre = document.getElementById('f-gasto-nombre').value.trim();
+  const monto = parsePrecio(document.getElementById('f-gasto-monto').value);
+  const cadaXDias = parseInt(document.getElementById('f-gasto-dias').value);
+  if (!nombre) { showToast('⚠️ Ingresá un nombre'); return; }
+  if (!monto || monto <= 0) { showToast('⚠️ Ingresá un monto válido'); return; }
+  if (!cadaXDias || cadaXDias <= 0) { showToast('⚠️ Ingresá cada cuántos días'); return; }
+
+  const data = { nombre, monto, cadaXDias, tipo: document.getElementById('f-gasto-tipo').value };
+  if (id) {
+    const idx = state.gastosFijos.findIndex(g => g.id === id);
+    state.gastosFijos[idx] = { ...state.gastosFijos[idx], ...data };
+    showToast('✏️ Gasto fijo actualizado');
+  } else {
+    state.gastosFijos.push({ id: nextId(), ...data });
+    showToast('💸 Gasto fijo agregado');
+  }
+  saveState(); closeModal();
+  renderScreen(activeScreen);
+}
+
+function confirmEliminarGastoFijo(id) {
+  const g = state.gastosFijos.find(x => x.id === id);
+  showConfirm('¿Eliminar gasto fijo?', `Se eliminará "${g.nombre}".`, () => {
+    state.gastosFijos = state.gastosFijos.filter(x => x.id !== id);
+    saveState(); closeModal();
+    showToast('Gasto fijo eliminado');
+    renderStock();
+  });
+}
+
+function openConfigCostosForm() {
+  openModal(`
+    <div class="modal-title">⚙️ Configuración de costos</div>
+    <div class="form-group">
+      <label class="form-label">Horas productivas por mes</label>
+      <input class="form-input" id="f-cfg-horas" type="number" min="1" step="1" value="${state.config.horasProductivasMes}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Usadas para prorratear los gastos fijos entre la producción del mes.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Valor de tu hora ($)</label>
+      <input class="form-input" id="f-cfg-valorhora" type="text" inputmode="decimal" value="${state.config.valorHora}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Se usa para sumar mano de obra al costo de cada receta.</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="saveConfigCostos()">💾 Guardar</button>
+    </div>
+  `);
+}
+
+function saveConfigCostos() {
+  state.config.horasProductivasMes = parseFloat(document.getElementById('f-cfg-horas').value) || state.config.horasProductivasMes;
+  state.config.valorHora = parsePrecio(document.getElementById('f-cfg-valorhora').value);
+  saveState(); closeModal();
+  showToast('⚙️ Configuración actualizada');
+  renderStock();
 }
 
 function ingredienteItem(i, tipo) {
@@ -2309,8 +2510,16 @@ function openIngredienteForm(id) {
         <option value="paq" ${i?.unidad==='paq'?'selected':''}>paquetes</option>
       </select>
     </div>
+    <div class="form-group">
+      <label class="form-label">💲 Costo por unidad ($/${i?.unidad||'kg'})</label>
+      <input class="form-input" id="f-costo-unitario" type="text" inputmode="decimal"
+        placeholder="Ej: 1.200" value="${i?.costoUnitario ? i.costoUnitario : ''}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">
+        Se usa para calcular el costo real de cada receta. Si lo dejás vacío y cargás el costo de compra abajo, se calcula solo (costo ÷ stock).
+      </div>
+    </div>
     ${!id ? `<div class="form-group">
-      <label class="form-label">💰 Costo de compra ($)</label>
+      <label class="form-label">💰 Costo de compra total ($)</label>
       <input class="form-input" id="f-costo" type="text" inputmode="decimal"
         placeholder="Ej: 2.500"
         style="border-color:var(--accent)">
@@ -2332,12 +2541,20 @@ function saveIngrediente(id) {
 
   const costoEl = document.getElementById('f-costo');
   const costo = costoEl ? parsePrecio(costoEl.value) : 0;
+  const stockVal = parseFloat(document.getElementById('f-stock').value) || 0;
+
+  const costoUnitEl = document.getElementById('f-costo-unitario');
+  let costoUnitario = costoUnitEl ? parsePrecio(costoUnitEl.value) : 0;
+  if (!costoUnitario && costo > 0 && stockVal > 0) {
+    costoUnitario = Math.round((costo / stockVal) * 100) / 100;
+  }
 
   const data = {
     nombre,
-    stock: parseFloat(document.getElementById('f-stock').value) || 0,
+    stock: stockVal,
     ideal: parseFloat(document.getElementById('f-ideal').value) || 1,
     unidad: document.getElementById('f-unidad').value,
+    costoUnitario,
   };
 
   if (id) {
@@ -2400,13 +2617,24 @@ function renderRecetasList() {
           return `<li><span>${ing ? ing.nombre : '(eliminado)'}</span><span>${i.cantidad} ${ing ? ing.unidad : ''}</span></li>`;
         }).join('')}</ul>`
       : `<div style="font-size:12px;color:var(--text3);margin-bottom:8px">Sin ingredientes cargados aún</div>`;
+    const paps = r.papeleria || [];
+    const papHtml = paps.length > 0
+      ? `<ul class="receta-ing-list">${paps.map(pr => {
+          const pap = state.papeleria.find(x => x.id === pr.papId);
+          return `<li><span>📋 ${pap ? pap.nombre : '(eliminado)'}</span><span>${pr.cantidad} ${pap ? pap.unidad : ''}</span></li>`;
+        }).join('')}</ul>`
+      : '';
+    const tiempoTxt = r.tiempoMinutos ? `⏱️ ${r.tiempoMinutos} min` : '⚠️ Sin tiempo';
+    const hornoTxt = r.minutosHorno ? `🔥 ${r.minutosHorno} min horno` : '🔥 sin horno de gas';
     return `
       <div class="receta-card">
         <div class="receta-card-header">
           <div class="receta-card-nombre">${r.producto}</div>
           <div class="receta-card-rinde">Rinde: ${r.rinde} ${r.unidadRinde}</div>
         </div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">${tiempoTxt} · ${hornoTxt}${r.mermaPct ? ` · 📉 ${r.mermaPct}% merma` : ''}</div>
         ${listHtml}
+        ${papHtml}
         <div class="receta-actions">
           <button class="btn btn-ghost btn-sm" onclick="openRecetaForm(${r.id})">✏️ Editar</button>
           <button class="btn btn-danger btn-sm" onclick="confirmEliminarReceta(${r.id})">🗑</button>
@@ -2418,10 +2646,13 @@ function renderRecetasList() {
 
 // _recetaItems: lista de { ingId, cantidad } en edición
 let _recetaItems = [];
+// _recetaPapeleria: lista de { papId, cantidad } en edición
+let _recetaPapeleria = [];
 
 function openRecetaForm(id) {
   const r = id ? state.recetas.find(x => x.id === id) : null;
   _recetaItems = r?.ingredientes ? JSON.parse(JSON.stringify(r.ingredientes)) : [];
+  _recetaPapeleria = r?.papeleria ? JSON.parse(JSON.stringify(r.papeleria)) : [];
 
   const unidadesRinde = ['g','kg','un','docena','1/4 kg','1/2 kg'];
   const unidadOpts = unidadesRinde.map(u => `<option value="${u}" ${r?.unidadRinde === u ? 'selected' : ''}>${u}</option>`).join('');
@@ -2453,6 +2684,26 @@ function openRecetaForm(id) {
         </select>
       </div>
     </div>
+    <div class="flex gap-8" style="margin-bottom:14px">
+      <div style="flex:1">
+        <label class="form-label">⏱️ Tiempo (minutos)</label>
+        <input class="form-input" id="f-rec-tiempo" type="number" min="0" step="1"
+          placeholder="Ej: 20" value="${r?.tiempoMinutos || ''}">
+      </div>
+      <div style="flex:1">
+        <label class="form-label">📉 Merma (%)</label>
+        <input class="form-input" id="f-rec-merma" type="number" min="0" max="100" step="0.1"
+          placeholder="Ej: 10" value="${r?.mermaPct || ''}">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">🔥 Minutos de horno</label>
+      <input class="form-input" id="f-rec-horno" type="number" min="0" step="1"
+        placeholder="Ej: 25" value="${r?.minutosHorno || ''}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">
+        Solo el tiempo que está prendido el horno para esta receta (no el proceso completo). Se usa para calcular el costo de gas.
+      </div>
+    </div>
 
     <div class="form-label" style="margin-bottom:6px">Ingredientes de la receta</div>
     <div id="receta-items-list"></div>
@@ -2475,6 +2726,27 @@ function openRecetaForm(id) {
       <button class="btn btn-secondary btn-full" onclick="agregarIngReceta()">+ Agregar ingrediente</button>
     </div>
 
+    <div class="form-label" style="margin-bottom:6px">📋 Papelería que usa</div>
+    <div id="receta-pap-list"></div>
+
+    <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px;border:1px solid var(--border);margin-bottom:14px">
+      <div class="form-label" style="margin-bottom:8px">Agregar artículo de papelería</div>
+      <div class="flex gap-8" style="margin-bottom:8px">
+        <div style="flex:2">
+          <label class="form-label">Artículo</label>
+          <select class="form-input" id="f-rec-pap">
+            <option value="">— Elegir —</option>
+            ${state.papeleria.map(p => `<option value="${p.id}">${p.nombre} (${p.unidad})</option>`).join('')}
+          </select>
+        </div>
+        <div style="flex:1">
+          <label class="form-label">Cantidad</label>
+          <input class="form-input" id="f-rec-pap-cant" type="number" min="0.01" step="0.01" placeholder="1">
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-full" onclick="agregarPapReceta()">+ Agregar artículo</button>
+    </div>
+
     <div class="modal-actions">
       <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
       <button class="btn btn-primary w-100" onclick="saveReceta(${id || 'null'})">💾 Guardar receta</button>
@@ -2482,6 +2754,7 @@ function openRecetaForm(id) {
   `);
   setTimeout(() => {
     renderRecetaItemsList();
+    renderRecetaPapeleriaList();
     initRecetaProductoAutocomplete();
   }, 50);
 }
@@ -2525,6 +2798,46 @@ function agregarIngReceta() {
 function quitarIngReceta(idx) {
   _recetaItems.splice(idx, 1);
   renderRecetaItemsList();
+}
+
+function renderRecetaPapeleriaList() {
+  const el = document.getElementById('receta-pap-list');
+  if (!el) return;
+  if (_recetaPapeleria.length === 0) {
+    el.innerHTML = '<div style="font-size:12px;color:var(--text3);margin-bottom:8px">Sin papelería asignada aún</div>';
+    return;
+  }
+  el.innerHTML = _recetaPapeleria.map((item, idx) => {
+    const pap = state.papeleria.find(x => x.id === item.papId);
+    return `
+      <div class="item-row">
+        <div class="item-row-info">
+          <div class="item-row-name">${pap ? pap.nombre : '(eliminado)'}</div>
+          <div class="item-row-detail">${item.cantidad} ${pap ? pap.unidad : ''}</div>
+        </div>
+        <button class="item-row-del" onclick="quitarPapReceta(${idx})">✕</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function agregarPapReceta() {
+  const papId = parseInt(document.getElementById('f-rec-pap').value);
+  const cant = parseFloat(document.getElementById('f-rec-pap-cant').value);
+  if (!papId) { showToast('⚠️ Elegí un artículo de papelería'); return; }
+  if (!cant || cant <= 0) { showToast('⚠️ Ingresá una cantidad válida'); return; }
+  if (_recetaPapeleria.find(x => x.papId === papId)) {
+    showToast('⚠️ Ese artículo ya está en la receta'); return;
+  }
+  _recetaPapeleria.push({ papId, cantidad: cant });
+  document.getElementById('f-rec-pap').value = '';
+  document.getElementById('f-rec-pap-cant').value = '';
+  renderRecetaPapeleriaList();
+}
+
+function quitarPapReceta(idx) {
+  _recetaPapeleria.splice(idx, 1);
+  renderRecetaPapeleriaList();
 }
 
 function initRecetaProductoAutocomplete() {
@@ -2639,7 +2952,13 @@ function saveReceta(id) {
   const eraDesconocido = !getCatalogo().some(p => p.nombre.toLowerCase() === producto.toLowerCase());
   agregarProductoAlCatalogoSiEsNuevo(producto, null);
 
-  const data = { producto, rinde, unidadRinde, ingredientes: [..._recetaItems] };
+  const data = {
+    producto, rinde, unidadRinde, ingredientes: [..._recetaItems],
+    papeleria: [..._recetaPapeleria],
+    tiempoMinutos: parseFloat(document.getElementById('f-rec-tiempo').value) || 0,
+    minutosHorno: parseFloat(document.getElementById('f-rec-horno').value) || 0,
+    mermaPct: parseFloat(document.getElementById('f-rec-merma').value) || 0,
+  };
 
   if (id) {
     const idx = state.recetas.findIndex(r => r.id === id);
@@ -2698,7 +3017,131 @@ function descontarMateriaPrimaByPedido(items) {
   return descuentos;
 }
 
-/* -------- PAPELERÍA -------- */
+/* ============================================================
+   MOTOR DE CÁLCULO — COSTO REAL POR PRODUCTO
+============================================================ */
+
+// Costo del gas por minuto de horno. Se asume 1 hora de horno fija por día
+// (no depende de las horas productivas del mes ni del tiempo total de la receta).
+function costoGasPorMinuto() {
+  const gas = (state.gastosFijos || []).find(g => g.tipo === 'gas');
+  if (!gas || !gas.cadaXDias) return 0;
+  const costoDiario = gas.monto / gas.cadaXDias;
+  return costoDiario / 60; // 60 min = la 1 hora de horno diaria
+}
+
+// Desglose de costo real de una receta, por unidad de venta
+function calcularCostoReceta(receta) {
+  if (!receta || !receta.rinde) return null;
+
+  let costoMP = 0;
+  (receta.ingredientes || []).forEach(ri => {
+    const ing = state.ingredientes.find(i => i.id === ri.ingId);
+    if (ing) costoMP += (ing.costoUnitario || 0) * ri.cantidad;
+  });
+  const materiaPrimaUnit = costoMP / receta.rinde;
+
+  let costoPap = 0;
+  (receta.papeleria || []).forEach(rp => {
+    const pap = state.papeleria.find(p => p.id === rp.papId);
+    if (pap) costoPap += (pap.costoUnitario || 0) * rp.cantidad;
+  });
+  const papeleriaUnit = costoPap / receta.rinde;
+
+  const horasReceta = (receta.tiempoMinutos || 0) / 60;
+  const manoObraUnit = (horasReceta * (state.config.valorHora || 0)) / receta.rinde;
+
+  const minutosHorno = receta.minutosHorno || 0;
+  const gasUnit = (minutosHorno * costoGasPorMinuto()) / receta.rinde;
+
+  const subtotalUnit = materiaPrimaUnit + manoObraUnit + gasUnit + papeleriaUnit;
+  const mermaPct = receta.mermaPct || 0;
+  const factorMerma = mermaPct > 0 ? 1 / (1 - mermaPct / 100) : 1;
+  const costoRealUnit = subtotalUnit * factorMerma;
+
+  return {
+    materiaPrimaUnit, manoObraUnit, gasUnit, papeleriaUnit,
+    subtotalUnit, factorMerma, costoRealUnit,
+  };
+}
+
+// Compara costo real vs precio de catálogo para un producto
+function calcularMargenProducto(nombreProducto) {
+  const receta = state.recetas.find(r => r.producto === nombreProducto);
+  const costo = calcularCostoReceta(receta);
+  const enCatalogo = getCatalogo().find(p => p.nombre === nombreProducto);
+  const precioVenta = enCatalogo ? enCatalogo.precio : null;
+
+  if (!costo) return { producto: nombreProducto, sinReceta: true, precioVenta };
+
+  const margen = precioVenta ? precioVenta - costo.costoRealUnit : null;
+  const margenPct = (precioVenta && precioVenta > 0) ? (margen / precioVenta) * 100 : null;
+
+  return { producto: nombreProducto, ...costo, precioVenta, margen, margenPct };
+}
+
+// Corre el cálculo para todas las recetas cargadas (uso en consola / debug)
+function calcularTodosLosMargenes() {
+  return state.recetas.map(r => calcularMargenProducto(r.producto));
+}
+window.calcularMargenProducto = calcularMargenProducto;
+window.calcularTodosLosMargenes = calcularTodosLosMargenes;
+
+/* -------- VISTA COMPARATIVA: COSTO REAL VS PRECIO -------- */
+function margenColor(m) {
+  if (m.margenPct === null) return { color: 'var(--text3)', bg: 'var(--surface2)', label: 'Sin precio' };
+  if (m.margenPct < 0)  return { color: 'var(--red)',    bg: 'var(--red-light)',    label: 'Pérdida' };
+  if (m.margenPct < 15) return { color: 'var(--yellow)', bg: 'var(--yellow-light)', label: 'Margen bajo' };
+  if (m.margenPct < 40) return { color: 'var(--blue)',   bg: 'var(--blue-light)',   label: 'Margen ok' };
+  return { color: 'var(--green)', bg: 'var(--green-light)', label: 'Buen margen' };
+}
+
+function openCostosReales() {
+  const margenes = calcularTodosLosMargenes();
+
+  if (margenes.length === 0) {
+    openModal(`
+      <div class="modal-title">📊 Costo real vs. precio</div>
+      <div class="empty-state"><div class="empty-icon">📋</div><p>Sin recetas cargadas todavía.</p></div>
+      <div class="modal-actions"><button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button></div>
+    `);
+    return;
+  }
+
+  const html = margenes.map(m => {
+    if (m.sinReceta) return '';
+    const c = margenColor(m);
+    return `
+      <div class="receta-card">
+        <div class="receta-card-header">
+          <div class="receta-card-nombre">${m.producto}</div>
+          <span class="badge" style="background:${c.bg};color:${c.color}">${c.label}</span>
+        </div>
+        <div class="detail-row"><span class="label">🧂 Materia prima</span><span class="value">${fmt(m.materiaPrimaUnit)}</span></div>
+        <div class="detail-row"><span class="label">⏱️ Mano de obra</span><span class="value">${fmt(m.manoObraUnit)}</span></div>
+        <div class="detail-row"><span class="label">🔥 Gas</span><span class="value">${fmt(m.gasUnit)}</span></div>
+        <div class="detail-row"><span class="label">📋 Papelería</span><span class="value">${fmt(m.papeleriaUnit)}</span></div>
+        ${m.factorMerma > 1 ? `<div class="detail-row"><span class="label">📉 Ajuste por merma</span><span class="value">×${m.factorMerma.toFixed(2)}</span></div>` : ''}
+        <div class="detail-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:8px">
+          <span class="label fw-600">Costo real</span><span class="value fw-600">${fmt(m.costoRealUnit)}</span>
+        </div>
+        <div class="detail-row"><span class="label">Precio de venta</span><span class="value">${m.precioVenta ? fmt(m.precioVenta) : '— sin precio en catálogo'}</span></div>
+        ${m.margen !== null ? `
+          <div class="detail-row"><span class="label fw-600">Margen</span><span class="value fw-600" style="color:${c.color}">${fmt(m.margen)} (${m.margenPct.toFixed(0)}%)</span></div>
+        ` : ''}
+      </div>
+    `;
+  }).join('');
+
+  openModal(`
+    <div class="modal-title">📊 Costo real vs. precio</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:14px">Costo por unidad de venta, incluye materia prima, mano de obra (${fmt(state.config.valorHora)}/hora) y gastos fijos prorrateados.</div>
+    ${html}
+    <div class="modal-actions"><button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button></div>
+  `);
+}
+
+
 function openSumarPapeleria(id) {
   const i = state.papeleria.find(x => x.id === id);
   openModal(`
@@ -2753,8 +3196,16 @@ function openPapeleriaForm(id) {
         <option value="hojas" ${i?.unidad==='hojas'?'selected':''}>hojas</option>
       </select>
     </div>
+    <div class="form-group">
+      <label class="form-label">💲 Costo por unidad ($/${i?.unidad||'un'})</label>
+      <input class="form-input" id="f-pap-costo-unitario" type="text" inputmode="decimal"
+        placeholder="Ej: 350" value="${i?.costoUnitario ? i.costoUnitario : ''}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">
+        Cuánto sale cada caja/bolsa/unidad suelta. Se usa para calcular el costo real de cada receta.
+      </div>
+    </div>
     ${!id ? `<div class="form-group">
-      <label class="form-label">💰 Costo de compra ($)</label>
+      <label class="form-label">💰 Costo de compra total ($)</label>
       <input class="form-input" id="f-pap-costo" type="text" inputmode="decimal"
         placeholder="Ej: 1.500">
       <div style="font-size:11px;color:var(--text3);margin-top:4px">
@@ -2774,12 +3225,15 @@ function savePapeleria(id) {
 
   const costoEl = document.getElementById('f-pap-costo');
   const costo = costoEl ? parsePrecio(costoEl.value) : 0;
+  const costoUnitEl = document.getElementById('f-pap-costo-unitario');
+  const costoUnitario = costoUnitEl ? parsePrecio(costoUnitEl.value) : 0;
 
   const data = {
     nombre,
     stock: parseFloat(document.getElementById('f-pap-stock').value) || 0,
     ideal: parseFloat(document.getElementById('f-pap-ideal').value) || 10,
     unidad: document.getElementById('f-pap-unidad').value,
+    costoUnitario,
   };
 
   if (id) {

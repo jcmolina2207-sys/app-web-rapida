@@ -945,6 +945,9 @@ const firebaseConfig = {
 };
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
+db.enablePersistence({ synchronizeTabs: true }).catch(err => {
+  console.warn('No se pudo habilitar persistencia offline:', err.code);
+});
 
 /* ============================================================
    ESTADO GLOBAL + SINCRONIZACIÓN FIREBASE
@@ -1014,18 +1017,24 @@ async function saveConfig(config) {
   } catch(e) {}
 }
 
-function saveState() {
-  saveCollection('pedidos', state.pedidos);
-  saveCollection('ingredientes', state.ingredientes);
-  saveCollection('movimientos', state.movimientos);
-  saveCollection('notas', state.notas);
-  saveCollection('recetas', state.recetas);
-  saveCollection('catalogo', state.catalogo);
-  saveCollection('gastosFijos', state.gastosFijos);
-  saveNextId(state.nextId);
-  saveConfig(state.config);
-  // Also save locally as backup
+async function saveState() {
+  // Guardar local primero (instantáneo, siempre disponible)
   localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
+  try {
+    await Promise.all([
+      saveCollection('pedidos', state.pedidos),
+      saveCollection('ingredientes', state.ingredientes),
+      saveCollection('movimientos', state.movimientos),
+      saveCollection('notas', state.notas),
+      saveCollection('recetas', state.recetas),
+      saveCollection('catalogo', state.catalogo),
+      saveCollection('gastosFijos', state.gastosFijos),
+      saveNextId(state.nextId),
+      saveConfig(state.config),
+    ]);
+  } catch (e) {
+    console.error('Error guardando en Firebase', e);
+  }
 }
 
 function nextId() { return ++state.nextId; }
@@ -1803,7 +1812,7 @@ function openProductoFormEditar(nombre, precioActual, cat, precioPorcionActual) 
   `);
 }
 
-function savePrecioProductoBase(nombre, cat) {
+async function savePrecioProductoBase(nombre, cat) {
   const precio = parsePrecio(document.getElementById('f-prod-precio-base')?.value);
   if (!precio || precio <= 0) { showToast('⚠️ Ingresá un precio válido'); return; }
 
@@ -1820,14 +1829,13 @@ function savePrecioProductoBase(nombre, cat) {
     // Crear un override en state.catalogo (marcado como custom para poder editarlo)
     state.catalogo.push({ nombre, precio, precioPorcion, cat, custom: true });
   }
-  
 
-  saveState();
+  await saveState();
   showToast(`✅ Precio de "${nombre}" actualizado a $${precio.toLocaleString('es-AR')}${precioPorcion ? ' · porción $' + precioPorcion.toLocaleString('es-AR') : ''}`);
   openCatalogo();
 }
 
-function saveProductoCatalogo(nombreAnterior) {
+async function saveProductoCatalogo(nombreAnterior) {
   const nombre = document.getElementById('f-prod-nombre')?.value.trim();
   const precioRaw = document.getElementById('f-prod-precio')?.value;
   const precio = precioRaw ? parsePrecio(precioRaw) : null;
@@ -1854,7 +1862,7 @@ function saveProductoCatalogo(nombreAnterior) {
     showToast('✨ Producto agregado al catálogo');
   }
 
-  saveState();
+  await saveState();
   openCatalogo();
 }
 

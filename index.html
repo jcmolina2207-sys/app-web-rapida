@@ -1605,11 +1605,11 @@ const CATALOGO_BASE = [
   { cat: '🥐 Churros — por docena', nombre: 'Docena churros DDL',    precio: 8000 },
   { cat: '🥐 Churros — por docena', nombre: 'Docena churros chocolate', precio: 9500 },
   { cat: '🥐 Churros — por docena', nombre: 'Docena churros chocolate + DDL', precio: 13000 },
-  { cat: '🎂 Tortas', nombre: 'Bizcochuelo',              precio: 4500 },
-  { cat: '🎂 Tortas', nombre: 'Lemon pie',                precio: 18000 },
-  { cat: '🎂 Tortas', nombre: 'Torta brownie',            precio: 26000 },
-  { cat: '🎂 Tortas', nombre: 'Pastafrola bata 14 cm',   precio: 12000 },
-  { cat: '🎂 Tortas', nombre: 'Pastafrola membrillo 14 cm', precio: 14000 },
+  { cat: '🎂 Tortas', nombre: 'Bizcochuelo',              precio: 4500, precioPorcion: null },
+  { cat: '🎂 Tortas', nombre: 'Lemon pie',                precio: 18000, precioPorcion: null },
+  { cat: '🎂 Tortas', nombre: 'Torta brownie',            precio: 26000, precioPorcion: null },
+  { cat: '🎂 Tortas', nombre: 'Pastafrola bata 14 cm',   precio: 12000, precioPorcion: null },
+  { cat: '🎂 Tortas', nombre: 'Pastafrola membrillo 14 cm', precio: 14000, precioPorcion: null },
   { cat: '🍞 Pan', nombre: 'Biscochitos 1/4',  precio: 1200 },
   { cat: '🍞 Pan', nombre: 'Pepas batata x 8 mayorista',     precio: 1760 },
   { cat: '🍞 Pan', nombre: 'Pepas batata x 8',     precio: 2400 },
@@ -1623,6 +1623,7 @@ function getCatalogo() {
     cat: c.cat || '✨ Mis productos',
     nombre: c.nombre,
     precio: c.precio || null,
+    precioPorcion: c.precioPorcion || null,
     custom: true,
   }));
   // Evitar duplicados: si ya existe en base, no agregar de custom
@@ -1687,17 +1688,20 @@ function renderCatalogoLista() {
       const precioStr = item.precio
         ? `<span style="font-weight:700;color:var(--accent)">$${Number(item.precio).toLocaleString('es-AR')}</span>`
         : `<span style="color:var(--text3);font-size:11px">Sin precio fijo</span>`;
+      const precioPorcionStr = item.precioPorcion
+        ? ` <span style="color:var(--text3);font-size:11px">· porción $${Number(item.precioPorcion).toLocaleString('es-AR')}</span>`
+        : (admitePorcion(item.nombre) ? ` <span style="color:var(--text3);font-size:11px">· sin precio de porción</span>` : '');
       html += `
         <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px">
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;color:var(--text)">${item.nombre}</div>
-            <div style="margin-top:2px">${precioStr}</div>
+            <div style="margin-top:2px">${precioStr}${precioPorcionStr}</div>
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0;margin-left:8px">
             ${esCustom
               ? `<button class="btn btn-ghost btn-sm" onclick="openProductoForm('${item.nombre.replace(/'/g,"\\'")}')">✏️</button>
                  <button class="btn btn-danger btn-sm" onclick="confirmEliminarProducto('${item.nombre.replace(/'/g,"\\'")}')">🗑</button>`
-              : `<button class="btn btn-ghost btn-sm" onclick="openProductoFormEditar('${item.nombre.replace(/'/g,"\\'")}', ${item.precio || 'null'}, '${item.cat.replace(/'/g,"\\'")}')">✏️ precio</button>`
+              : `<button class="btn btn-ghost btn-sm" onclick="openProductoFormEditar('${item.nombre.replace(/'/g,"\\'")}', ${item.precio || 'null'}, '${item.cat.replace(/'/g,"\\'")}', ${item.precioPorcion || 'null'})">✏️ precio</button>`
             }
           </div>
         </div>`;
@@ -1721,13 +1725,18 @@ function openProductoForm(nombreExistente) {
     <div class="modal-title">${p ? 'Editar producto' : 'Nuevo producto'}</div>
     <div class="form-group">
       <label class="form-label">Nombre *</label>
-      <input class="form-input" id="f-prod-nombre" type="text"
+      <input class="form-input" id="f-prod-nombre" type="text" oninput="onProdNombreInput()"
         placeholder="Ej: Torta de chocolate" value="${p?.nombre || ''}">
     </div>
     <div class="form-group">
-      <label class="form-label">Precio ($) <span style="font-weight:400;color:var(--text3)">(opcional)</span></label>
+      <label class="form-label">Precio entero / unidad ($) <span style="font-weight:400;color:var(--text3)">(opcional)</span></label>
       <input class="form-input" id="f-prod-precio" type="text" inputmode="decimal"
         placeholder="Ej: 15.000" value="${p?.precio || ''}">
+    </div>
+    <div class="form-group" id="prod-porcion-wrap" style="display:none">
+      <label class="form-label">🍰 Precio por porción ($) <span style="font-weight:400;color:var(--text3)">(opcional)</span></label>
+      <input class="form-input" id="f-prod-precio-porcion" type="text" inputmode="decimal"
+        placeholder="Ej: 2.500" value="${p?.precioPorcion || ''}">
     </div>
     <div class="form-group">
       <label class="form-label">Categoría</label>
@@ -1738,21 +1747,35 @@ function openProductoForm(nombreExistente) {
       <button class="btn btn-primary w-100" onclick="saveProductoCatalogo('${nombreExistente || ''}')">💾 Guardar</button>
     </div>
   `);
+  setTimeout(() => onProdNombreInput(), 50);
+}
+
+function onProdNombreInput() {
+  const nombre = document.getElementById('f-prod-nombre')?.value || '';
+  const wrap = document.getElementById('prod-porcion-wrap');
+  if (wrap) wrap.style.display = admitePorcion(nombre) ? 'block' : 'none';
 }
 
 // Editar precio de un producto BASE (se guarda en state.catalogo como override)
-function openProductoFormEditar(nombre, precioActual, cat) {
+function openProductoFormEditar(nombre, precioActual, cat, precioPorcionActual) {
+  const muestraPorcion = admitePorcion(nombre);
   openModal(`
     <div class="modal-title">✏️ Editar precio</div>
     <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px">${nombre}</div>
     <div style="font-size:12px;color:var(--text3);margin-bottom:16px">${cat}</div>
     <div class="form-group">
-      <label class="form-label">Nuevo precio ($)</label>
+      <label class="form-label">Precio entero / unidad ($)</label>
       <input class="form-input" id="f-prod-precio-base" type="text" inputmode="decimal"
         placeholder="Ej: 15.000" value="${precioActual || ''}">
     </div>
+    ${muestraPorcion ? `
+    <div class="form-group">
+      <label class="form-label">🍰 Precio por porción ($) <span style="font-weight:400;color:var(--text3)">(opcional)</span></label>
+      <input class="form-input" id="f-prod-precio-porcion" type="text" inputmode="decimal"
+        placeholder="Ej: 2.500" value="${precioPorcionActual || ''}">
+    </div>` : ''}
     <div style="font-size:11px;color:var(--text3);margin-bottom:14px;padding:8px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
-      💡 Este cambio actualiza el precio que aparece en el catálogo al crear pedidos.
+      💡 Estos precios se usan al crear pedidos, según elijas "entera" o "por porción".
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost w-100" onclick="openCatalogo()">← Volver</button>
@@ -1765,21 +1788,28 @@ function savePrecioProductoBase(nombre, cat) {
   const precio = parsePrecio(document.getElementById('f-prod-precio-base')?.value);
   if (!precio || precio <= 0) { showToast('⚠️ Ingresá un precio válido'); return; }
 
+  const precioPorcionEl = document.getElementById('f-prod-precio-porcion');
+  const precioPorcion = precioPorcionEl ? (parsePrecio(precioPorcionEl.value) || null) : null;
+
   state.catalogo = state.catalogo || [];
   // Buscar si ya existe un override para este producto
   const idx = state.catalogo.findIndex(x => x.nombre === nombre);
   if (idx >= 0) {
     state.catalogo[idx].precio = precio;
+    state.catalogo[idx].precioPorcion = precioPorcion;
   } else {
     // Crear un override en state.catalogo (marcado como custom para poder editarlo)
-    state.catalogo.push({ nombre, precio, cat, custom: true });
+    state.catalogo.push({ nombre, precio, precioPorcion, cat, custom: true });
   }
   // Actualizar también en CATALOGO_BASE si existe
   const baseIdx = CATALOGO_BASE.findIndex(x => x.nombre === nombre);
-  if (baseIdx >= 0) CATALOGO_BASE[baseIdx].precio = precio;
+  if (baseIdx >= 0) {
+    CATALOGO_BASE[baseIdx].precio = precio;
+    CATALOGO_BASE[baseIdx].precioPorcion = precioPorcion;
+  }
 
   saveState();
-  showToast(`✅ Precio de "${nombre}" actualizado a $${precio.toLocaleString('es-AR')}`);
+  showToast(`✅ Precio de "${nombre}" actualizado a $${precio.toLocaleString('es-AR')}${precioPorcion ? ' · porción $' + precioPorcion.toLocaleString('es-AR') : ''}`);
   openCatalogo();
 }
 
@@ -1787,6 +1817,8 @@ function saveProductoCatalogo(nombreAnterior) {
   const nombre = document.getElementById('f-prod-nombre')?.value.trim();
   const precioRaw = document.getElementById('f-prod-precio')?.value;
   const precio = precioRaw ? parsePrecio(precioRaw) : null;
+  const precioPorcionEl = document.getElementById('f-prod-precio-porcion');
+  const precioPorcion = precioPorcionEl ? (parsePrecio(precioPorcionEl.value) || null) : null;
   const cat = document.getElementById('f-prod-cat')?.value || '✨ Mis productos';
 
   if (!nombre) { showToast('⚠️ Escribí un nombre'); return; }
@@ -1797,14 +1829,14 @@ function saveProductoCatalogo(nombreAnterior) {
     // Editar existente
     const idx = state.catalogo.findIndex(x => x.nombre === nombreAnterior);
     if (idx >= 0) {
-      state.catalogo[idx] = { nombre, precio: precio || null, cat, custom: true };
+      state.catalogo[idx] = { nombre, precio: precio || null, precioPorcion, cat, custom: true };
     }
     showToast('✏️ Producto actualizado');
   } else {
     // Verificar que no exista ya
     const yaExiste = getCatalogo().some(p => p.nombre.toLowerCase() === nombre.toLowerCase());
     if (yaExiste) { showToast('⚠️ Ya existe un producto con ese nombre'); return; }
-    state.catalogo.push({ nombre, precio: precio || null, cat, custom: true });
+    state.catalogo.push({ nombre, precio: precio || null, precioPorcion, cat, custom: true });
     showToast('✨ Producto agregado al catálogo');
   }
 
@@ -1977,8 +2009,14 @@ function onPresentacionChange() {
   const hint = document.getElementById('f-precio-hint');
   if (pres === 'porcion') {
     if (window._resetPrecioFijoPedido) window._resetPrecioFijoPedido();
-    if (precioEl) { precioEl.value = ''; precioEl.focus(); }
-    if (hint) hint.textContent = '💡 Ingresá el precio de la porción (es distinto al de la unidad entera)';
+    const pp = window._getPrecioPorcionSeleccionado ? window._getPrecioPorcionSeleccionado() : null;
+    if (pp) {
+      if (precioEl) precioEl.value = Math.round(pp);
+      if (hint) hint.textContent = `💡 Precio de porción del catálogo: $${Math.round(pp).toLocaleString('es-AR')} (podés cambiarlo)`;
+    } else {
+      if (precioEl) { precioEl.value = ''; precioEl.focus(); }
+      if (hint) hint.textContent = '💡 Ingresá el precio de la porción (es distinto al de la unidad entera)';
+    }
   } else {
     if (hint) hint.textContent = '';
   }
@@ -2134,12 +2172,15 @@ function initProductoAutocomplete() {
     }
   }
 
+  let precioPorcionSel = null;
+
   function setPrecioUnitario(pr) {
     precioUnitario = pr ? Number(pr) : null;
     recalcTotal();
   }
 
   window._resetPrecioFijoPedido = () => { precioUnitario = null; };
+  window._getPrecioPorcionSeleccionado = () => precioPorcionSel;
 
   // Cuando cambia la cantidad → recalcula
   cantEl.addEventListener('input', recalcTotal);
@@ -2172,7 +2213,7 @@ function initProductoAutocomplete() {
       html += `<div class="prod-cat">${cat}</div>`;
       items.forEach(item => {
         const precioStr = item.precio ? `$${item.precio.toLocaleString('es-AR')} c/u` : '';
-        html += `<div class="prod-option" data-nombre="${item.nombre.replace(/"/g,'&quot;')}" data-precio="${item.precio||''}">
+        html += `<div class="prod-option" data-nombre="${item.nombre.replace(/"/g,'&quot;')}" data-precio="${item.precio||''}" data-precioporcion="${item.precioPorcion||''}">
           <span>${highlight(item.nombre, q)}</span>
           ${precioStr ? `<span class="prod-precio">${precioStr}</span>` : '<span class="prod-precio" style="color:var(--text3);font-weight:400">Ingresar precio</span>'}
         </div>`;
@@ -2208,11 +2249,13 @@ function initProductoAutocomplete() {
         if (opt.dataset.nuevo === 'true') {
           agregarProductoAlCatalogoSiEsNuevo(opt.dataset.nombre, null);
           saveState();
+          precioPorcionSel = null;
           const hint = document.getElementById('f-precio-hint');
           if (hint) hint.textContent = '✨ Producto guardado en tu catálogo';
           setTimeout(() => { precioEl.focus(); precioEl.select(); }, 50);
         } else {
           setPrecioUnitario(opt.dataset.precio);
+          precioPorcionSel = opt.dataset.precioporcion ? Number(opt.dataset.precioporcion) : null;
           // Si no tiene precio fijo, enfocar el campo precio
           if (!opt.dataset.precio) {
             setTimeout(() => { precioEl.focus(); precioEl.select(); }, 50);
@@ -2229,6 +2272,7 @@ function initProductoAutocomplete() {
     const catAct = getCatalogo();
     const match = catAct.find(p => p.nombre.toLowerCase() === input.value.trim().toLowerCase());
     setPrecioUnitario(match ? match.precio : null);
+    precioPorcionSel = match ? (match.precioPorcion || null) : null;
     renderDropdown(input.value);
     togglePresentacionWrap(input.value);
   });

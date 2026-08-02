@@ -1854,6 +1854,12 @@ function openPedidoForm(id) {
           autocomplete="off">
         <div class="producto-dropdown" id="prod-dropdown"></div>
       </div>
+      <div class="form-group" id="presentacion-wrap" style="margin-bottom:8px;display:none">
+        <select class="form-input" id="f-presentacion" onchange="onPresentacionChange()" style="font-size:13px;cursor:pointer">
+          <option value="entera">🎂 Entera / unidad completa</option>
+          <option value="porcion">🍰 Por porción (precio distinto)</option>
+        </select>
+      </div>
       <div class="flex gap-8" style="margin-bottom:8px">
         <div style="flex:1">
           <label class="form-label">Cantidad</label>
@@ -1899,6 +1905,7 @@ function openPedidoForm(id) {
     initProductoAutocomplete();
     initClienteAutocomplete();
     renderItemsList();
+    togglePresentacionWrap('');
   }, 50);
 }
 
@@ -1911,17 +1918,21 @@ function renderItemsList() {
   }
   const total = _pedidoItems.reduce((s, i) => s + i.subtotal, 0);
   el.innerHTML = _pedidoItems.map((item, idx) => {
-    const receta = state.recetas.find(r => r.producto === item.producto);
+    const esItemPorcion = esPorcion(item.producto);
+    const nombreBase = esItemPorcion ? nombreBaseProducto(item.producto) : item.producto;
+    const receta = state.recetas.find(r => r.producto === nombreBase);
     const tieneReceta = !!receta;
     let margenHtml = '';
     if (tieneReceta) {
       const costo = calcularCostoReceta(receta);
       if (costo && costo.costoRealUnit > 0) {
-        const margen = item.precioUnit - costo.costoRealUnit;
+        const divisor = esItemPorcion ? (receta.porcionesPorUnidad || 1) : 1;
+        const costoRealAjustado = costo.costoRealUnit / divisor;
+        const margen = item.precioUnit - costoRealAjustado;
         const margenPct = (margen / item.precioUnit) * 100;
         const c = margenColor({ margenPct });
         margenHtml = `<div style="font-size:11px;margin-top:2px">
-          <span style="color:${c.color};font-weight:600">Costo real: ${fmt(costo.costoRealUnit)} · Margen: ${margenPct.toFixed(0)}% (${c.label})</span>
+          <span style="color:${c.color};font-weight:600">Costo real: ${fmt(costoRealAjustado)} · Margen: ${margenPct.toFixed(0)}% (${c.label})</span>
         </div>`;
       }
     }
@@ -1941,20 +1952,54 @@ function renderItemsList() {
       <span>$${total.toLocaleString('es-AR')}</span>
     </div>`;
 }
+  // Palabras clave de productos que se pueden vender también por porción
+  const PRODUCTOS_CON_PORCION = ['torta', 'tarta', 'pastafrola', 'pie', 'bizcochuelo', 'lemon pie', 'brownie'];
+
+  function admitePorcion(nombreProducto) {
+    const n = nombreProducto.toLowerCase();
+    return PRODUCTOS_CON_PORCION.some(kw => n.includes(kw));
+  }
+
+  function togglePresentacionWrap(nombreProducto) {
+    const wrap = document.getElementById('presentacion-wrap');
+    const sel = document.getElementById('f-presentacion');
+    if (!wrap || !sel) return;
+    if (nombreProducto && admitePorcion(nombreProducto)) {
+      wrap.style.display = 'block';
+    } else {
+      wrap.style.display = 'none';
+      sel.value = 'entera'; // resetear a entera si se oculta
+    }
+  }
+function onPresentacionChange() {
+  const pres = document.getElementById('f-presentacion')?.value;
+  const precioEl = document.getElementById('f-precio-unit');
+  const hint = document.getElementById('f-precio-hint');
+  if (pres === 'porcion') {
+    if (window._resetPrecioFijoPedido) window._resetPrecioFijoPedido();
+    if (precioEl) { precioEl.value = ''; precioEl.focus(); }
+    if (hint) hint.textContent = '💡 Ingresá el precio de la porción (es distinto al de la unidad entera)';
+  } else {
+    if (hint) hint.textContent = '';
+  }
+}
 
 function agregarItemPedido() {
-  const prod = document.getElementById('f-producto')?.value.trim();
+  const prodBase = document.getElementById('f-producto')?.value.trim();
+  const presentacion = document.getElementById('f-presentacion')?.value || 'entera';
   const cant = parseInt(document.getElementById('f-cantidad')?.value) || 1;
   const precioUnit = parsePrecio(document.getElementById('f-precio-unit')?.value);
-  if (!prod) { showToast('⚠️ Escribí un producto'); return; }
+  if (!prodBase) { showToast('⚠️ Escribí un producto'); return; }
   if (!precioUnit) { showToast('⚠️ Ingresá el precio unitario'); return; }
 
-  // Si el producto es nuevo, guardarlo en el catálogo
-  const eraDesconocido = !getCatalogo().some(p => p.nombre.toLowerCase() === prod.toLowerCase());
+  const prod = presentacion === 'porcion' ? `${prodBase} (porción)` : prodBase;
+
+  // Si el producto BASE es nuevo, guardarlo en el catálogo (sin el sufijo de porción)
+  const eraDesconocido = !getCatalogo().some(p => p.nombre.toLowerCase() === prodBase.toLowerCase());
   if (eraDesconocido) {
-    agregarProductoAlCatalogoSiEsNuevo(prod, precioUnit);
-    saveState(); // guardar catálogo actualizado
-    showToast(`✨ "${prod}" guardado en tu catálogo`);
+    agregarProductoAlCatalogoSiEsNuevo(prodBase, presentacion === 'entera' ? precioUnit : null);
+    saveState();
+    showToast(`✨ "${prodBase}" guardado en tu catálogo`);
   }
 
   _pedidoItems.push({ producto: prod, cantidad: cant, precioUnit, subtotal: cant * precioUnit });
@@ -1963,6 +2008,7 @@ function agregarItemPedido() {
   document.getElementById('f-cantidad').value = '1';
   document.getElementById('f-precio-unit').value = '';
   document.getElementById('f-precio-hint').textContent = '';
+  document.getElementById('f-presentacion').value = 'entera';
   renderItemsList();
 }
 
@@ -2092,6 +2138,8 @@ function initProductoAutocomplete() {
     recalcTotal();
   }
 
+  window._resetPrecioFijoPedido = () => { precioUnitario = null; };
+
   // Cuando cambia la cantidad → recalcula
   cantEl.addEventListener('input', recalcTotal);
   cantEl.addEventListener('change', recalcTotal);
@@ -2154,6 +2202,7 @@ function initProductoAutocomplete() {
       opt.addEventListener('mousedown', (e) => {
         e.preventDefault();
         input.value = opt.dataset.nombre;
+        togglePresentacionWrap(input.value);
         // Si es nuevo, agregarlo al catálogo y mostrar mensaje en hint
         if (opt.dataset.nuevo === 'true') {
           agregarProductoAlCatalogoSiEsNuevo(opt.dataset.nombre, null);
@@ -2180,6 +2229,7 @@ function initProductoAutocomplete() {
     const match = catAct.find(p => p.nombre.toLowerCase() === input.value.trim().toLowerCase());
     setPrecioUnitario(match ? match.precio : null);
     renderDropdown(input.value);
+    togglePresentacionWrap(input.value);
   });
   input.addEventListener('blur', () => {
     setTimeout(() => dropdown.classList.remove('open'), 150);
@@ -2676,6 +2726,14 @@ function openRecetaForm(id) {
         Solo el tiempo que está prendido el horno para esta receta (no el proceso completo). Se usa para calcular el costo de gas.
       </div>
     </div>
+    <div class="form-group">
+      <label class="form-label">🍰 Porciones por unidad (opcional)</label>
+      <input class="form-input" id="f-rec-porciones" type="number" min="1" step="1"
+        placeholder="Ej: 8" value="${r?.porcionesPorUnidad || ''}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">
+        Si esta receta también se vende por porción (ej: una pastafrola que rinde 1 unidad y se corta en 8), indicá acá cuántas porciones salen de cada unidad. Así el descuento de stock y el costo se calculan bien cuando vendés "por porción".
+      </div>
+    </div>
 
     <div class="form-label" style="margin-bottom:6px">Ingredientes de la receta</div>
     <div id="receta-items-list"></div>
@@ -2867,6 +2925,7 @@ function saveReceta(id) {
     tiempoMinutos: parseFloat(document.getElementById('f-rec-tiempo').value) || 0,
     minutosHorno: parseFloat(document.getElementById('f-rec-horno').value) || 0,
     mermaPct: parseFloat(document.getElementById('f-rec-merma').value) || 0,
+    porcionesPorUnidad: parseFloat(document.getElementById('f-rec-porciones').value) || 0,
   };
 
   if (id) {
@@ -2905,15 +2964,34 @@ function confirmEliminarReceta(id) {
  * proporcionalmente según la cantidad vendida vs la cantidad que rinde la receta.
  * Devuelve un resumen de lo descontado para el toast.
  */
+// Si el producto del pedido termina en "(porción)", devuelve el nombre base
+function nombreBaseProducto(nombreItem) {
+  return nombreItem.replace(/\s*\(porción\)\s*$/i, '').trim();
+}
+function esPorcion(nombreItem) {
+  return /\(porción\)\s*$/i.test(nombreItem);
+}
+
 function descontarMateriaPrimaByPedido(items) {
   const descuentos = [];
   items.forEach(item => {
-    const receta = state.recetas.find(r => r.producto === item.producto);
+    const esItemPorcion = esPorcion(item.producto);
+    const nombreBase = esItemPorcion ? nombreBaseProducto(item.producto) : item.producto;
+    const receta = state.recetas.find(r => r.producto === nombreBase);
     if (!receta || !receta.ingredientes || receta.ingredientes.length === 0) return;
 
-    // Factor = cuántas "recetas completas" se necesitan para este item
-    // La receta rinde `receta.rinde` unidades; el pedido pide `item.cantidad`
-    const factor = item.cantidad / receta.rinde;
+    let factor;
+    if (esItemPorcion) {
+      const porciones = receta.porcionesPorUnidad || 1;
+      if (!receta.porcionesPorUnidad) {
+        descuentos.push(`⚠️ "${nombreBase}" no tiene definidas las porciones por unidad — se descontó como si fuera 1 unidad entera`);
+      }
+      // Cuántas "unidades completas" equivalen a las porciones vendidas
+      factor = (item.cantidad / porciones) / receta.rinde;
+    } else {
+      // Factor = cuántas "recetas completas" se necesitan para este item
+      factor = item.cantidad / receta.rinde;
+    }
 
     receta.ingredientes.forEach(ri => {
       const ing = state.ingredientes.find(x => x.id === ri.ingId);

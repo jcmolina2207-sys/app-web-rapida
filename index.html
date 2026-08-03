@@ -2804,20 +2804,23 @@ function openRecetaForm(id) {
 
     <div class="form-label" style="margin-bottom:6px">Ingredientes de la receta</div>
     <div id="receta-items-list"></div>
-
-    <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px;border:1px solid var(--border);margin-bottom:14px">
+<div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px;border:1px solid var(--border);margin-bottom:14px">
       <div class="form-label" style="margin-bottom:8px">Agregar ingrediente</div>
+      <div class="form-group">
+        <label class="form-label">Materia prima</label>
+        <select class="form-input" id="f-rec-ing" onchange="onRecIngChange()">
+          <option value="">— Elegir —</option>
+          ${state.ingredientes.map(i => `<option value="${i.id}">${i.nombre} (${i.unidad})</option>`).join('')}
+        </select>
+      </div>
       <div class="flex gap-8" style="margin-bottom:8px">
-        <div style="flex:2">
-          <label class="form-label">Materia prima</label>
-          <select class="form-input" id="f-rec-ing">
-            <option value="">— Elegir —</option>
-            ${state.ingredientes.map(i => `<option value="${i.id}">${i.nombre} (${i.unidad})</option>`).join('')}
-          </select>
-        </div>
         <div style="flex:1">
           <label class="form-label">Cantidad</label>
           <input class="form-input" id="f-rec-cant" type="number" min="0.001" step="0.001" placeholder="0">
+        </div>
+        <div style="flex:1">
+          <label class="form-label">Unidad</label>
+          <select class="form-input" id="f-rec-cant-unidad"></select>
         </div>
       </div>
       <button class="btn btn-secondary btn-full" onclick="agregarIngReceta()">+ Agregar ingrediente</button>
@@ -2855,18 +2858,57 @@ function renderRecetaItemsList() {
   }).join('');
 }
 
+// Grupos de unidades convertibles entre sí (masa y volumen)
+const UNIDAD_GRUPOS = {
+  g:  { grupo: 'masa',    factor: 0.001 }, // factor a la unidad de referencia (kg)
+  kg: { grupo: 'masa',    factor: 1 },
+  ml: { grupo: 'volumen', factor: 0.001 }, // factor a la unidad de referencia (lt)
+  lt: { grupo: 'volumen', factor: 1 },
+};
+
+function unidadesCompatibles(unidadBase) {
+  const info = UNIDAD_GRUPOS[unidadBase];
+  if (!info) return [unidadBase]; // un, paq: no tienen conversión
+  return Object.keys(UNIDAD_GRUPOS).filter(u => UNIDAD_GRUPOS[u].grupo === info.grupo);
+}
+
+function convertirCantidad(cantidad, unidadIngresada, unidadBase) {
+  if (unidadIngresada === unidadBase) return cantidad;
+  const infoBase = UNIDAD_GRUPOS[unidadBase];
+  const infoIng  = UNIDAD_GRUPOS[unidadIngresada];
+  if (!infoBase || !infoIng || infoBase.grupo !== infoIng.grupo) return cantidad; // no convertible
+  const enReferencia = cantidad * infoIng.factor;
+  return enReferencia / infoBase.factor;
+}
+
+function onRecIngChange() {
+  const ingId = parseInt(document.getElementById('f-rec-ing').value);
+  const sel = document.getElementById('f-rec-cant-unidad');
+  if (!sel) return;
+  if (!ingId) { sel.innerHTML = ''; return; }
+  const ing = state.ingredientes.find(i => i.id === ingId);
+  if (!ing) return;
+  const opciones = unidadesCompatibles(ing.unidad);
+  sel.innerHTML = opciones.map(u => `<option value="${u}" ${u === ing.unidad ? 'selected' : ''}>${u}</option>`).join('');
+}
+
 function agregarIngReceta() {
   const ingId = parseInt(document.getElementById('f-rec-ing').value);
-  const cant = parseFloat(document.getElementById('f-rec-cant').value);
+  const cantIngresada = parseFloat(document.getElementById('f-rec-cant').value);
+  const unidadSel = document.getElementById('f-rec-cant-unidad');
   if (!ingId) { showToast('⚠️ Elegí un ingrediente'); return; }
-  if (!cant || cant <= 0) { showToast('⚠️ Ingresá una cantidad válida'); return; }
+  if (!cantIngresada || cantIngresada <= 0) { showToast('⚠️ Ingresá una cantidad válida'); return; }
   // No duplicar el mismo ingrediente
   if (_recetaItems.find(x => x.ingId === ingId)) {
     showToast('⚠️ Ese ingrediente ya está en la receta'); return;
   }
-  _recetaItems.push({ ingId, cantidad: cant });
+  const ing = state.ingredientes.find(i => i.id === ingId);
+  const unidadIngresada = unidadSel?.value || ing.unidad;
+  const cantidad = convertirCantidad(cantIngresada, unidadIngresada, ing.unidad);
+  _recetaItems.push({ ingId, cantidad: Math.round(cantidad * 100000) / 100000 });
   document.getElementById('f-rec-ing').value = '';
   document.getElementById('f-rec-cant').value = '';
+  if (unidadSel) unidadSel.innerHTML = '';
   renderRecetaItemsList();
 }
 

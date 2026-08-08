@@ -928,6 +928,13 @@
 
   <!-- TOAST -->
   <div class="toast" id="toast"></div>
+  <!-- TOAST -->
+  <div class="toast" id="toast"></div>
+
+  <!-- INPUT OCULTO PARA IMPORTAR BACKUP -->
+  <input type="file" id="import-file-input" accept="application/json,.json" style="display:none" onchange="handleImportFile(event)">
+
+  </div><!-- /.main-area -->
   </div><!-- /.main-area -->
 </div>
 
@@ -969,6 +976,9 @@ let state = {
 
 let _nextIdFromDB = 1;
 
+// Colecciones que se sincronizan documento-por-documento (subcolecciones reales)
+const SYNCED_COLLECTIONS = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','gastosFijos'];
+
 // Sync status UI
 function setSyncStatus(status) {
   const dot = document.getElementById('sync-dot');
@@ -989,20 +999,50 @@ function setSyncStatus(status) {
   }
 }
 
-// Save a collection to Firestore
-async function saveCollection(colName, items) {
+// El catálogo no tiene id numérico (se identifica por 'nombre'), así que
+// usamos un id de documento derivado del nombre.
+function catalogoDocId(nombre) {
+  return encodeURIComponent(String(nombre || '').trim().toLowerCase()).slice(0, 300);
+}
+
+function docIdFor(colName, item) {
+  return colName === 'catalogo' ? catalogoDocId(item.nombre) : String(item.id);
+}
+
+// Guarda/actualiza UN SOLO documento (no pisa el resto de la colección).
+// customDocId es opcional; si no se pasa, se calcula con docIdFor().
+async function persistItem(colName, item, customDocId) {
+  if (!item) return;
+  const docId = customDocId || docIdFor(colName, item);
+  if (!docId || docId === 'undefined' || docId === 'null') {
+    console.error(`persistItem: docId inválido para ${colName}`, item);
+    return;
+  }
   setSyncStatus('saving');
   try {
-    const col = db.collection(colName);
-    // Use a single doc per collection for simplicity (small data)
-    await db.collection('app').doc(colName).set({ items: items });
+    await db.collection(colName).doc(docId).set(item);
     setSyncStatus('ok');
-  } catch(e) {
-    console.error('Save error', e);
+  } catch (e) {
+    console.error(`Error guardando ${colName}/${docId}`, e);
     setSyncStatus('error');
-    // Fallback to localStorage
-    localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
   }
+  // Respaldo local siempre, incluso si Firestore falló
+  localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
+}
+
+// Elimina UN SOLO documento. Para catálogo, pasar customDocId=catalogoDocId(nombre)
+// y id=null; para el resto, pasar el id numérico normal.
+async function removeItem(colName, id, customDocId) {
+  const docId = customDocId || String(id);
+  setSyncStatus('saving');
+  try {
+    await db.collection(colName).doc(docId).delete();
+    setSyncStatus('ok');
+  } catch (e) {
+    console.error(`Error eliminando ${colName}/${docId}`, e);
+    setSyncStatus('error');
+  }
+  localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
 }
 
 async function saveNextId(id) {
@@ -1017,24 +1057,30 @@ async function saveConfig(config) {
   } catch(e) {}
 }
 
-async function saveState() {
-  // Guardar local primero (instantáneo, siempre disponible)
+// saveState() YA NO sobreescribe colecciones completas en Firestore.
+// Sirve como respaldo local (localStorage) + guarda meta/config, que sí
+// son documentos únicos legítimos (no arrays de entidades). El guardado
+// real de pedidos/ingredientes/etc. en Firestore lo hacen persistItem()
+// y removeItem(), documento por documento, en cada acción del usuario.
+function saveState() {
   localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
-  try {
-    await Promise.all([
-      saveCollection('pedidos', state.pedidos),
-      saveCollection('ingredientes', state.ingredientes),
-      saveCollection('movimientos', state.movimientos),
-      saveCollection('notas', state.notas),
-      saveCollection('recetas', state.recetas),
-      saveCollection('catalogo', state.catalogo),
-      saveCollection('gastosFijos', state.gastosFijos),
-      saveNextId(state.nextId),
-      saveConfig(state.config),
-    ]);
-  } catch (e) {
-    console.error('Error guardando en Firebase', e);
-  }
+  saveNextId(state.nextId);
+  saveConfig(state.config);
+}
+
+// Persiste en Firestore los ingredientes cuyo stock cambió por descuento/
+// reversión de materia prima al crear, editar o eliminar un pedido.
+function persistIngredientesDeItems(items) {
+  const ids = new Set();
+  (items || []).forEach(item => {
+    const nombreBase = esPorcion(item.producto) ? nombreBaseProducto(item.producto) : item.producto;
+    const receta = state.recetas.find(r => r.producto === nombreBase);
+    if (receta) (receta.ingredientes || []).forEach(ri => ids.add(ri.ingId));
+  });
+  ids.forEach(id => {
+    const ing = state.ingredientes.find(i => i.id === id);
+    if (ing) persistItem('ingredientes', ing);
+  });
 }
 
 function nextId() { return ++state.nextId; }
@@ -1062,7 +1108,7 @@ function parsePrecio(val) {
   return parseFloat(s) || 0;
 }
 
-// Load all data from Firestore on startup
+// Load all data from Firestore on startup (lee cada subcolección documento por documento)
 async function loadFromFirebase() {
   setSyncStatus('connecting');
 
@@ -1081,17 +1127,14 @@ async function loadFromFirebase() {
 
   // Luego intentar Firebase con timeout de 5 segundos
   const firebasePromise = (async () => {
-    const cols = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','gastosFijos'];
     const results = await Promise.all(
-      cols.map(c => db.collection('app').doc(c).get())
+      SYNCED_COLLECTIONS.map(c => db.collection(c).get())
     );
     const metaDoc = await db.collection('app').doc('meta').get();
     const configDoc = await db.collection('app').doc('config').get();
 
-    cols.forEach((c, i) => {
-      if (results[i].exists) {
-        state[c] = results[i].data().items || [];
-      }
+    SYNCED_COLLECTIONS.forEach((c, i) => {
+      state[c] = results[i].docs.map(d => d.data());
     });
 
     if (metaDoc.exists) {
@@ -1120,13 +1163,15 @@ async function loadFromFirebase() {
 // Siembra los datos de costos que pasó Sofía (una sola vez, no duplica)
 function seedDatosSofia() {
   let cambio = false;
+  const gastosNuevos = [];
+  let recetaCambiada = null;
 
   state.gastosFijos = state.gastosFijos || [];
   if (state.gastosFijos.length === 0) {
-    state.gastosFijos.push(
-      { id: nextId(), nombre: 'Gas', monto: 28000, cadaXDias: 35, tipo: 'gas' },
-      { id: nextId(), nombre: 'Papelería', monto: 20000, cadaXDias: 20, tipo: 'papeleria' },
-    );
+    const g1 = { id: nextId(), nombre: 'Gas', monto: 28000, cadaXDias: 35, tipo: 'gas' };
+    const g2 = { id: nextId(), nombre: 'Papelería', monto: 20000, cadaXDias: 20, tipo: 'papeleria' };
+    state.gastosFijos.push(g1, g2);
+    gastosNuevos.push(g1, g2);
     cambio = true;
   }
 
@@ -1134,6 +1179,7 @@ function seedDatosSofia() {
   if (churro && churro.mermaPct === undefined) {
     churro.mermaPct = Math.round((11 / 32) * 1000) / 10; // 34.4%
     churro.mermaCadaXDias = 15;
+    recetaCambiada = churro;
     cambio = true;
   }
 
@@ -1142,20 +1188,43 @@ function seedDatosSofia() {
     cambio = true;
   }
 
-  if (cambio) saveState();
+  if (cambio) {
+    gastosNuevos.forEach(g => persistItem('gastosFijos', g));
+    if (recetaCambiada) persistItem('recetas', recetaCambiada);
+    saveState();
+  }
 }
 
-// Real-time listeners for live sync between devices
+// Real-time listeners for live sync between devices.
+// Escuchan la COLECCIÓN completa (no un doc único) y aplican solo el
+// documento que cambió al array local, en vez de reemplazar todo el
+// array — así dos dispositivos guardando cosas distintas al mismo
+// tiempo no se pisan entre sí.
 function setupRealtimeSync() {
-  const cols = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','gastosFijos'];
-  cols.forEach(c => {
-    db.collection('app').doc(c).onSnapshot(doc => {
-      if (doc.exists) {
-        state[c] = doc.data().items || [];
+  SYNCED_COLLECTIONS.forEach(colName => {
+    db.collection(colName).onSnapshot(snapshot => {
+      snapshot.docChanges().forEach(change => {
+        const arr = state[colName];
+        if (!arr) return;
+        const data = change.doc.data();
+
+        const idx = colName === 'catalogo'
+          ? arr.findIndex(x => catalogoDocId(x.nombre) === change.doc.id)
+          : arr.findIndex(x => String(x.id) === change.doc.id);
+
+        if (change.type === 'removed') {
+          if (idx >= 0) arr.splice(idx, 1);
+        } else { // 'added' o 'modified'
+          if (idx >= 0) arr[idx] = data; else arr.push(data);
+        }
+      });
+
+      if (snapshot.docChanges().length > 0) {
         renderScreen(activeScreen);
-        setSyncStatus('ok');
       }
+      setSyncStatus('ok');
     }, err => {
+      console.error(`Error de sync en ${colName}`, err);
       setSyncStatus('error');
     });
   });
@@ -1196,6 +1265,9 @@ function globalStockPct() {
 }
 function totalSaldo() {
   return state.movimientos.reduce((s, m) => m.tipo === 'income' ? s + m.monto : s - m.monto, 0);
+}
+function totalPorCobrar() {
+  return state.pedidos.filter(p => !p.pagado).reduce((s, p) => s + (p.precio || 0), 0);
 }
 function totalIngresos() {
   return state.movimientos.filter(m => m.tipo === 'income').reduce((s, m) => s + m.monto, 0);
@@ -1254,7 +1326,116 @@ function closeConfirm() {
   document.getElementById('confirm').classList.remove('open');
 }
 document.getElementById('confirm-cancel').onclick = closeConfirm;
+/* ============================================================
+   BACKUP: EXPORTAR / IMPORTAR
+============================================================ */
+function exportarDatos() {
+  const backup = {
+    pedidos: state.pedidos,
+    ingredientes: state.ingredientes,
+    movimientos: state.movimientos,
+    notas: state.notas,
+    recetas: state.recetas,
+    catalogo: state.catalogo,
+    gastosFijos: state.gastosFijos,
+    config: state.config,
+    nextId: state.nextId,
+    _exportadoEl: todayStr(),
+  };
 
+  const json = JSON.stringify(backup, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `backup-toque-artesano-${todayStr()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  showToast('📦 Backup descargado');
+}
+
+function importarDatos() {
+  document.getElementById('import-file-input').value = '';
+  document.getElementById('import-file-input').click();
+}
+
+function handleImportFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    let data;
+    try {
+      data = JSON.parse(e.target.result);
+    } catch (err) {
+      showToast('❌ Archivo inválido, no es un JSON válido');
+      return;
+    }
+
+    // Validación mínima: que tenga al menos algunas de las claves esperadas
+    const clavesEsperadas = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','gastosFijos','config'];
+    const tieneAlguna = clavesEsperadas.some(k => k in data);
+    if (!tieneAlguna) {
+      showToast('❌ El archivo no parece un backup válido');
+      return;
+    }
+
+    showConfirm(
+      '¿Restaurar backup?',
+      'Esto va a REEMPLAZAR todos los datos actuales (pedidos, ingredientes, movimientos, notas, recetas, catálogo, gastos fijos y configuración) por los del archivo. No se puede deshacer.',
+      async () => {
+        state.pedidos = data.pedidos || [];
+        state.ingredientes = data.ingredientes || [];
+        state.movimientos = data.movimientos || [];
+        state.notas = data.notas || [];
+        state.recetas = data.recetas || [];
+        state.catalogo = data.catalogo || [];
+        state.gastosFijos = data.gastosFijos || [];
+        state.config = { ...state.config, ...(data.config || {}) };
+        state.nextId = data.nextId || state.nextId;
+
+        showToast('⏳ Restaurando en la nube...');
+        await restaurarBackupEnFirestore();
+        saveState();
+        renderScreen(activeScreen);
+        showToast('✅ Datos restaurados correctamente');
+      }
+    );
+  };
+  reader.readAsText(file);
+}
+
+// Reemplaza TODAS las subcolecciones en Firestore por el contenido actual de `state`.
+// Se usa solo al restaurar un backup completo (reemplazo total intencional).
+async function restaurarBackupEnFirestore() {
+  for (const col of SYNCED_COLLECTIONS) {
+    const snap = await db.collection(col).get();
+    if (snap.docs.length) {
+      const batchDelete = db.batch();
+      snap.docs.forEach(d => batchDelete.delete(d.ref));
+      await batchDelete.commit();
+    }
+
+    const items = state[col] || [];
+    for (let i = 0; i < items.length; i += 400) {
+      const chunk = items.slice(i, i + 400);
+      if (chunk.length === 0) continue;
+      const batch = db.batch();
+      chunk.forEach(item => {
+        const docId = col === 'catalogo' ? catalogoDocId(item.nombre) : String(item.id);
+        batch.set(db.collection(col).doc(docId), item);
+      });
+      await batch.commit();
+    }
+  }
+  await saveNextId(state.nextId);
+  await saveConfig(state.config);
+}
 /* ============================================================
    MODAL (BOTTOM SHEET)
 ============================================================ */
@@ -1424,6 +1605,42 @@ function renderInicio() {
         <div style="margin-top:10px"><button class="btn btn-secondary btn-sm" onclick="navigate('notas')">Ver todas</button></div>
       ` : `<div class="empty-state" style="padding:16px 0"><p>Sin notas aún</p></div>`}
     </div>
+
+    <!-- POR COBRAR -->
+    <div class="card anim-in" style="animation-delay:.24s">
+      <div class="card-header">
+        <div class="card-title"><span class="card-icon">🧾</span> Por cobrar</div>
+      </div>
+      <div class="dash-saldo-big" style="color:${totalPorCobrar()>0?'var(--red)':'var(--text)'}">${fmt(totalPorCobrar())}</div>
+      <div class="text-sm text-muted mb-12">
+        ${totalPorCobrar() > 0 ? `📌 ${state.pedidos.filter(p=>!p.pagado).length} pedido${state.pedidos.filter(p=>!p.pagado).length !== 1 ? 's' : ''} sin cobrar` : '✅ Todo cobrado'}
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="navigate('clientes')">Ver clientes</button>
+    </div>
+    </div><!-- /dash-grid -->
+    <!-- POR COBRAR -->
+    <div class="card anim-in" style="animation-delay:.24s">
+      <div class="card-header">
+        <div class="card-title"><span class="card-icon">🧾</span> Por cobrar</div>
+      </div>
+      <div class="dash-saldo-big" style="color:${totalPorCobrar()>0?'var(--red)':'var(--text)'}">${fmt(totalPorCobrar())}</div>
+      <div class="text-sm text-muted mb-12">
+        ${totalPorCobrar() > 0 ? `📌 ${state.pedidos.filter(p=>!p.pagado).length} pedido${state.pedidos.filter(p=>!p.pagado).length !== 1 ? 's' : ''} sin cobrar` : '✅ Todo cobrado'}
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="navigate('clientes')">Ver clientes</button>
+    </div>
+
+    <!-- BACKUP -->
+    <div class="card anim-in" style="animation-delay:.30s">
+      <div class="card-header">
+        <div class="card-title"><span class="card-icon">🗂️</span> Backup de datos</div>
+      </div>
+      <div class="text-sm text-muted mb-12">Descargá una copia de seguridad o restaurá una anterior.</div>
+      <div class="flex gap-8" style="flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" onclick="exportarDatos()">⬇️ Exportar datos</button>
+        <button class="btn btn-ghost btn-sm" onclick="importarDatos()">⬆️ Importar datos</button>
+      </div>
+    </div>
     </div><!-- /dash-grid -->
   `;
 }
@@ -1559,14 +1776,18 @@ function marcarEntregado(id, fromDash) {
   p.estado = 'done';
   // auto-ingreso
   const yaExiste = state.movimientos.some(m => m.auto && m.descripcion.includes(p.cliente) && m.descripcion.includes(p.producto.substring(0, 15)));
+  let nuevoMov = null;
   if (!yaExiste) {
-    state.movimientos.unshift({
+    nuevoMov = {
       id: nextId(), tipo: 'income',
       descripcion: `${p.producto} - ${p.cliente}`,
       monto: p.precio, fecha: todayStr(), auto: true,
       pedidoId: p.id
-    });
+    };
+    state.movimientos.unshift(nuevoMov);
   }
+  persistItem('pedidos', p);
+  if (nuevoMov) persistItem('movimientos', nuevoMov);
   saveState();
   closeModal();
   showToast('✅ Pedido entregado · Ingreso registrado');
@@ -1577,6 +1798,7 @@ function marcarPagado(id) {
   const p = state.pedidos.find(x => x.id === id);
   if (!p) return;
   p.pagado = true;
+  persistItem('pedidos', p);
   saveState();
   closeModal();
   showToast('💰 Pago registrado');
@@ -1585,9 +1807,15 @@ function marcarPagado(id) {
 
 function confirmEliminarPedido(id) {
   showConfirm('¿Eliminar pedido?', 'Esta acción no se puede deshacer.', () => {
+    const pedido = state.pedidos.find(p => p.id === id);
+    if (pedido && pedido.items && pedido.items.length > 0) {
+      revertirMateriaPrimaByPedido(pedido.items);
+      persistIngredientesDeItems(pedido.items);
+    }
     state.pedidos = state.pedidos.filter(p => p.id !== id);
+    removeItem('pedidos', id);
     saveState(); closeModal();
-    showToast('Pedido eliminado');
+    showToast('Pedido eliminado · stock repuesto');
     renderScreen(activeScreen);
   });
 }
@@ -1821,15 +2049,19 @@ async function savePrecioProductoBase(nombre, cat) {
   state.catalogo = state.catalogo || [];
   // Buscar si ya existe un override para este producto
   const idx = state.catalogo.findIndex(x => x.nombre === nombre);
+  let itemGuardado;
   if (idx >= 0) {
     state.catalogo[idx].precio = precio;
     state.catalogo[idx].precioPorcion = precioPorcion;
+    itemGuardado = state.catalogo[idx];
   } else {
     // Crear un override en state.catalogo (marcado como custom para poder editarlo)
-    state.catalogo.push({ nombre, precio, precioPorcion, cat, custom: true });
+    itemGuardado = { nombre, precio, precioPorcion, cat, custom: true };
+    state.catalogo.push(itemGuardado);
   }
 
-  await saveState();
+  await persistItem('catalogo', itemGuardado, catalogoDocId(nombre));
+  saveState();
   showToast(`✅ Precio de "${nombre}" actualizado a $${precio.toLocaleString('es-AR')}${precioPorcion ? ' · porción $' + precioPorcion.toLocaleString('es-AR') : ''}`);
   openCatalogo();
 }
@@ -1845,29 +2077,38 @@ async function saveProductoCatalogo(nombreAnterior) {
   if (!nombre) { showToast('⚠️ Escribí un nombre'); return; }
 
   state.catalogo = state.catalogo || [];
+  let itemGuardado;
 
   if (nombreAnterior) {
     // Editar existente
     const idx = state.catalogo.findIndex(x => x.nombre === nombreAnterior);
     if (idx >= 0) {
-      state.catalogo[idx] = { nombre, precio: precio || null, precioPorcion, cat, custom: true };
+      itemGuardado = { nombre, precio: precio || null, precioPorcion, cat, custom: true };
+      state.catalogo[idx] = itemGuardado;
+      // Si cambió el nombre, el id de documento cambia: borrar el doc viejo
+      if (nombreAnterior !== nombre) {
+        await removeItem('catalogo', null, catalogoDocId(nombreAnterior));
+      }
     }
     showToast('✏️ Producto actualizado');
   } else {
     // Verificar que no exista ya
     const yaExiste = getCatalogo().some(p => p.nombre.toLowerCase() === nombre.toLowerCase());
     if (yaExiste) { showToast('⚠️ Ya existe un producto con ese nombre'); return; }
-    state.catalogo.push({ nombre, precio: precio || null, precioPorcion, cat, custom: true });
+    itemGuardado = { nombre, precio: precio || null, precioPorcion, cat, custom: true };
+    state.catalogo.push(itemGuardado);
     showToast('✨ Producto agregado al catálogo');
   }
 
-  await saveState();
+  if (itemGuardado) await persistItem('catalogo', itemGuardado, catalogoDocId(itemGuardado.nombre));
+  saveState();
   openCatalogo();
 }
 
 function confirmEliminarProducto(nombre) {
   showConfirm('¿Eliminar producto?', `Se eliminará "${nombre}" del catálogo.`, () => {
     state.catalogo = (state.catalogo || []).filter(x => x.nombre !== nombre);
+    removeItem('catalogo', null, catalogoDocId(nombre));
     saveState();
     showToast('🗑 Producto eliminado');
     openCatalogo();
@@ -2056,7 +2297,8 @@ function agregarItemPedido() {
   // Si el producto BASE es nuevo, guardarlo en el catálogo (sin el sufijo de porción)
   const eraDesconocido = !getCatalogo().some(p => p.nombre.toLowerCase() === prodBase.toLowerCase());
   if (eraDesconocido) {
-    agregarProductoAlCatalogoSiEsNuevo(prodBase, presentacion === 'entera' ? precioUnit : null);
+    const nuevoCatItem = agregarProductoAlCatalogoSiEsNuevo(prodBase, presentacion === 'entera' ? precioUnit : null);
+    if (nuevoCatItem) persistItem('catalogo', nuevoCatItem, catalogoDocId(nuevoCatItem.nombre));
     saveState();
     showToast(`✨ "${prodBase}" guardado en tu catálogo`);
   }
@@ -2268,7 +2510,8 @@ function initProductoAutocomplete() {
         togglePresentacionWrap(input.value);
         // Si es nuevo, agregarlo al catálogo y mostrar mensaje en hint
         if (opt.dataset.nuevo === 'true') {
-          agregarProductoAlCatalogoSiEsNuevo(opt.dataset.nombre, null);
+          const nuevoCatItem = agregarProductoAlCatalogoSiEsNuevo(opt.dataset.nombre, null);
+          if (nuevoCatItem) persistItem('catalogo', nuevoCatItem, catalogoDocId(nuevoCatItem.nombre));
           saveState();
           precioPorcionSel = null;
           const hint = document.getElementById('f-precio-hint');
@@ -2327,13 +2570,27 @@ function savePedido(id) {
 
   if (id) {
     const idx = state.pedidos.findIndex(p => p.id === id);
+    const itemsAnteriores = state.pedidos[idx].items || [];
+    // Ajustar stock: devolver lo descontado con los items viejos y
+    // volver a descontar según los items nuevos
+    revertirMateriaPrimaByPedido(itemsAnteriores);
+    const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
+    persistIngredientesDeItems([...itemsAnteriores, ..._pedidoItems]);
     state.pedidos[idx] = { ...state.pedidos[idx], ...data };
+    persistItem('pedidos', state.pedidos[idx]);
     saveState(); closeModal();
-    showToast('✏️ Pedido actualizado');
+    if (descuentos.length > 0) {
+      showToast('✏️ Pedido actualizado · 🧂 stock ajustado');
+    } else {
+      showToast('✏️ Pedido actualizado');
+    }
   } else {
-    state.pedidos.push({ id: nextId(), ...data });
+    const nuevoPedido = { id: nextId(), ...data };
+    state.pedidos.push(nuevoPedido);
     // Descontar materia prima según recetas
     const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
+    persistIngredientesDeItems(_pedidoItems);
+    persistItem('pedidos', nuevoPedido);
     saveState(); closeModal();
     if (descuentos.length > 0) {
       showToast('📦 Pedido creado · 🧂 ' + descuentos.slice(0, 3).join(', ') + (descuentos.length > 3 ? ' y más...' : ''));
@@ -2478,14 +2735,18 @@ function saveGastoFijo(id) {
   if (!cadaXDias || cadaXDias <= 0) { showToast('⚠️ Ingresá cada cuántos días'); return; }
 
   const data = { nombre, monto, cadaXDias, tipo: document.getElementById('f-gasto-tipo').value };
+  let gastoGuardado;
   if (id) {
     const idx = state.gastosFijos.findIndex(g => g.id === id);
     state.gastosFijos[idx] = { ...state.gastosFijos[idx], ...data };
+    gastoGuardado = state.gastosFijos[idx];
     showToast('✏️ Gasto fijo actualizado');
   } else {
-    state.gastosFijos.push({ id: nextId(), ...data });
+    gastoGuardado = { id: nextId(), ...data };
+    state.gastosFijos.push(gastoGuardado);
     showToast('💸 Gasto fijo agregado');
   }
+  persistItem('gastosFijos', gastoGuardado);
   saveState(); closeModal();
   renderScreen(activeScreen);
 }
@@ -2494,6 +2755,7 @@ function confirmEliminarGastoFijo(id) {
   const g = state.gastosFijos.find(x => x.id === id);
   showConfirm('¿Eliminar gasto fijo?', `Se eliminará "${g.nombre}".`, () => {
     state.gastosFijos = state.gastosFijos.filter(x => x.id !== id);
+    removeItem('gastosFijos', id);
     saveState(); closeModal();
     showToast('Gasto fijo eliminado');
     renderGastosFijosScreen();
@@ -2570,6 +2832,7 @@ function sumarStock(id) {
   if (!v || v <= 0) { showToast('⚠️ Ingresá una cantidad válida'); return; }
   const i = state.ingredientes.find(x => x.id === id);
   i.stock = Math.round((i.stock + v) * 100) / 100;
+  persistItem('ingredientes', i);
   saveState(); closeModal();
   showToast('✅ Stock actualizado');
   renderIngredientes();
@@ -2659,20 +2922,25 @@ function saveIngrediente(id) {
   if (id) {
     const idx = state.ingredientes.findIndex(i => i.id === id);
     state.ingredientes[idx] = { ...state.ingredientes[idx], ...data };
+    persistItem('ingredientes', state.ingredientes[idx]);
     saveState(); closeModal();
     showToast('✏️ Ingrediente actualizado');
   } else {
-    state.ingredientes.push({ id: nextId(), ...data });
+    const nuevoIng = { id: nextId(), ...data };
+    state.ingredientes.push(nuevoIng);
+    persistItem('ingredientes', nuevoIng);
     // Auto-registrar egreso si se ingresó un costo
     if (costo > 0) {
-      state.movimientos.unshift({
+      const nuevoMov = {
         id: nextId(),
         tipo: 'expense',
         descripcion: `Compra de ${nombre}`,
         monto: costo,
         fecha: todayStr(),
         auto: true,
-      });
+      };
+      state.movimientos.unshift(nuevoMov);
+      persistItem('movimientos', nuevoMov);
       saveState(); closeModal();
       showToast(`🧂 Agregado · 💸 Egreso de ${fmt(costo)} registrado en Finanzas`);
     } else {
@@ -2687,6 +2955,7 @@ function confirmEliminarIngrediente(id) {
   const i = state.ingredientes.find(x => x.id === id);
   showConfirm('¿Eliminar ingrediente?', `Se eliminará "${i.nombre}" del stock.`, () => {
     state.ingredientes = state.ingredientes.filter(x => x.id !== id);
+    removeItem('ingredientes', id);
     saveState();
     showToast('Ingrediente eliminado');
     renderIngredientes();
@@ -3005,13 +3274,15 @@ function initRecetaProductoAutocomplete() {
  * Se llama desde saveReceta y agregarItemPedido cuando el nombre no está en getCatalogo().
  */
 function agregarProductoAlCatalogoSiEsNuevo(nombre, precio) {
-  if (!nombre) return;
+  if (!nombre) return null;
   const cat = getCatalogo();
   const yaExiste = cat.some(p => p.nombre.toLowerCase() === nombre.toLowerCase());
-  if (yaExiste) return; // no duplicar
+  if (yaExiste) return null; // no duplicar
   state.catalogo = state.catalogo || [];
-  state.catalogo.push({ nombre, precio: precio || null, cat: '✨ Mis productos' });
-  // No guardamos aquí separado — se guarda con saveState() del llamador
+  const nuevo = { nombre, precio: precio || null, cat: '✨ Mis productos', custom: true };
+  state.catalogo.push(nuevo);
+  // Devuelve el item creado para que el llamador lo persista con persistItem()
+  return nuevo;
 }
 
 
@@ -3026,7 +3297,8 @@ function saveReceta(id) {
 
   // Guardar al catálogo si es un producto nuevo
   const eraDesconocido = !getCatalogo().some(p => p.nombre.toLowerCase() === producto.toLowerCase());
-  agregarProductoAlCatalogoSiEsNuevo(producto, null);
+  const nuevoCatItem = agregarProductoAlCatalogoSiEsNuevo(producto, null);
+  if (nuevoCatItem) persistItem('catalogo', nuevoCatItem, catalogoDocId(nuevoCatItem.nombre));
 
   const data = {
     producto, rinde, unidadRinde, ingredientes: [..._recetaItems],
@@ -3036,21 +3308,26 @@ function saveReceta(id) {
     porcionesPorUnidad: parseFloat(document.getElementById('f-rec-porciones').value) || 0,
   };
 
+  let recetaGuardada;
   if (id) {
     const idx = state.recetas.findIndex(r => r.id === id);
     state.recetas[idx] = { ...state.recetas[idx], ...data };
+    recetaGuardada = state.recetas[idx];
     showToast('✏️ Receta actualizada' + (eraDesconocido ? ' · ✨ Producto guardado en catálogo' : ''));
   } else {
     // Si ya existe receta para ese producto, reemplazar
     const existing = state.recetas.findIndex(r => r.producto === producto);
     if (existing >= 0) {
       state.recetas[existing] = { ...state.recetas[existing], ...data };
+      recetaGuardada = state.recetas[existing];
       showToast('✏️ Receta actualizada' + (eraDesconocido ? ' · ✨ Producto guardado en catálogo' : ''));
     } else {
-      state.recetas.push({ id: nextId(), ...data });
+      recetaGuardada = { id: nextId(), ...data };
+      state.recetas.push(recetaGuardada);
       showToast('📋 Receta guardada' + (eraDesconocido ? ' · ✨ Producto guardado en catálogo' : ''));
     }
   }
+  persistItem('recetas', recetaGuardada);
   saveState();
   closeModal();
   renderScreen(activeScreen);
@@ -3060,6 +3337,7 @@ function confirmEliminarReceta(id) {
   const r = state.recetas.find(x => x.id === id);
   showConfirm('¿Eliminar receta?', `Se eliminará la receta de "${r.producto}".`, () => {
     state.recetas = state.recetas.filter(x => x.id !== id);
+    removeItem('recetas', id);
     saveState(); closeModal();
     showToast('Receta eliminada');
     renderRecetas();
@@ -3110,6 +3388,39 @@ function descontarMateriaPrimaByPedido(items) {
     });
   });
   return descuentos;
+}
+
+/**
+ * Revierte (devuelve) la materia prima descontada por un pedido.
+ * Se usa al editar un pedido (para deshacer los items viejos antes de
+ * aplicar los nuevos) y al eliminar un pedido (para devolver todo el stock).
+ * Usa la misma lógica de factor que descontarMateriaPrimaByPedido, en reversa.
+ */
+function revertirMateriaPrimaByPedido(items) {
+  const reversiones = [];
+  (items || []).forEach(item => {
+    const esItemPorcion = esPorcion(item.producto);
+    const nombreBase = esItemPorcion ? nombreBaseProducto(item.producto) : item.producto;
+    const receta = state.recetas.find(r => r.producto === nombreBase);
+    if (!receta || !receta.ingredientes || receta.ingredientes.length === 0) return;
+
+    let factor;
+    if (esItemPorcion) {
+      const porciones = receta.porcionesPorUnidad || 1;
+      factor = (item.cantidad / porciones) / receta.rinde;
+    } else {
+      factor = item.cantidad / receta.rinde;
+    }
+
+    receta.ingredientes.forEach(ri => {
+      const ing = state.ingredientes.find(x => x.id === ri.ingId);
+      if (!ing) return;
+      const cantDevolver = Math.round(ri.cantidad * factor * 1000) / 1000;
+      ing.stock = Math.round((ing.stock + cantDevolver) * 1000) / 1000;
+      reversiones.push(`${ing.nombre}: +${cantDevolver} ${ing.unidad}`);
+    });
+  });
+  return reversiones;
 }
 
 /* ============================================================
@@ -3505,6 +3816,7 @@ function saveEditMovimiento(id) {
     monto,
     fecha: document.getElementById('f-edit-fecha').value || todayStr(),
   };
+  persistItem('movimientos', state.movimientos[idx]);
   saveState(); closeModal();
   showToast('✏️ Movimiento actualizado');
   renderScreen(activeScreen);
@@ -3514,6 +3826,7 @@ function confirmEliminarMovimiento(id) {
   const m = state.movimientos.find(x => x.id === id);
   showConfirm('¿Eliminar movimiento?', `Se eliminará "${m.descripcion}" de forma permanente.`, () => {
     state.movimientos = state.movimientos.filter(x => x.id !== id);
+    removeItem('movimientos', id);
     saveState(); closeModal();
     showToast('🗑 Movimiento eliminado');
     renderScreen(activeScreen);
@@ -3673,15 +3986,23 @@ function saveMovimiento() {
     }
   }
 
-  state.movimientos.unshift({
+  const nuevoMov = {
     id: nextId(),
     tipo: document.getElementById('f-tipo').value,
     descripcion: desc,
     monto,
     fecha: document.getElementById('f-fecha-mov').value || todayStr(),
     auto: false,
-  });
+  };
+  state.movimientos.unshift(nuevoMov);
+  const ingIdAfectado = _movIngredienteId;
   _movIngredienteId = null;
+
+  persistItem('movimientos', nuevoMov);
+  if (stockActualizado && ingIdAfectado) {
+    const ing = state.ingredientes.find(x => x.id === ingIdAfectado);
+    if (ing) persistItem('ingredientes', ing);
+  }
   saveState(); closeModal();
   showToast(stockActualizado ? '💰 Movimiento registrado · 🧂 Stock actualizado' : '💰 Movimiento registrado');
   renderScreen(activeScreen);
@@ -3743,12 +4064,16 @@ function saveNota(id) {
     texto,
     fecha: document.getElementById('f-nota-fecha').value || todayStr(),
   };
+  let notaGuardada;
   if (id) {
     const idx = state.notas.findIndex(n => n.id === id);
     state.notas[idx] = { ...state.notas[idx], ...data };
+    notaGuardada = state.notas[idx];
   } else {
-    state.notas.push({ id: nextId(), ...data });
+    notaGuardada = { id: nextId(), ...data };
+    state.notas.push(notaGuardada);
   }
+  persistItem('notas', notaGuardada);
   saveState(); closeModal();
   showToast(id ? '✏️ Nota actualizada' : '📝 Nota guardada');
   renderScreen(activeScreen);
@@ -3757,6 +4082,7 @@ function saveNota(id) {
 function confirmEliminarNota(id) {
   showConfirm('¿Eliminar nota?', 'Esta acción no se puede deshacer.', () => {
     state.notas = state.notas.filter(n => n.id !== id);
+    removeItem('notas', id);
     saveState();
     showToast('Nota eliminada');
     renderNotas();
@@ -3784,49 +4110,32 @@ function getClientes() {
     const nombre = p.cliente.trim();
     if (!nombre) return;
     if (!mapa[nombre]) {
-      mapa[nombre] = { nombre, pedidos: [], totalGastado: 0, ultimoPedido: '' };
+      mapa[nombre] = { nombre, pedidos: [], totalGastado: 0, totalAdeudado: 0, ultimoPedido: '' };
     }
     mapa[nombre].pedidos.push(p);
     mapa[nombre].totalGastado += p.precio || 0;
+    if (!p.pagado) mapa[nombre].totalAdeudado += p.precio || 0;
     if (!mapa[nombre].ultimoPedido || p.fechaEntrega > mapa[nombre].ultimoPedido) {
       mapa[nombre].ultimoPedido = p.fechaEntrega;
     }
   });
-  return Object.values(mapa).sort((a, b) => b.totalGastado - a.totalGastado);
+  // Prioridad: primero quienes más deben, luego por total gastado
+  return Object.values(mapa).sort((a, b) => b.totalAdeudado - a.totalAdeudado || b.totalGastado - a.totalGastado);
 }
 
 function renderClientes() {
   const el = document.getElementById('screen-clientes');
   const clientes = getClientes();
+  const conDeuda = clientes.filter(c => c.totalAdeudado > 0).length;
 
   el.innerHTML = `
-    <div class="section-sub" style="margin-bottom:16px">${clientes.length} cliente${clientes.length !== 1 ? 's' : ''} registrado${clientes.length !== 1 ? 's' : ''} · ordenados por total gastado</div>
+    <div class="section-sub" style="margin-bottom:16px">${clientes.length} cliente${clientes.length !== 1 ? 's' : ''} registrado${clientes.length !== 1 ? 's' : ''}${conDeuda > 0 ? ` · ${conDeuda} con saldo pendiente` : ''}</div>
     ${clientes.length === 0
       ? `<div class="empty-state"><div class="empty-icon">👥</div><p>Aún no hay clientes registrados</p></div>`
       : `<div class="list-2col">${clientes.map(c => clienteCard(c)).join('')}</div>`
     }
   `;
-}
-
-function clienteCard(c) {
-  const cantPedidos = c.pedidos.length;
-  const entregados = c.pedidos.filter(p => p.estado === 'done').length;
-  return `
-    <div class="cliente-card anim-in" onclick="openClienteDetalle('${c.nombre.replace(/'/g,"\'")}')">
-      <div class="cliente-card-header">
-        <div class="cliente-card-name">👤 ${c.nombre}</div>
-        <div style="font-weight:700;color:var(--accent)">${fmt(c.totalGastado)}</div>
-      </div>
-      <div class="cliente-card-stats">
-        <span class="cliente-stat">📦 ${cantPedidos} pedido${cantPedidos !== 1 ? 's' : ''}</span>
-        <span class="cliente-stat">✅ ${entregados} entregado${entregados !== 1 ? 's' : ''}</span>
-        <span class="cliente-stat">📅 Último: ${fmtDate(c.ultimoPedido)}</span>
-      </div>
-    </div>
-  `;
-}
-
-function openClienteDetalle(nombre) {
+}function openClienteDetalle(nombre) {
   const c = getClientes().find(x => x.nombre === nombre);
   if (!c) return;
   const pedidosOrdenados = [...c.pedidos].sort((a, b) => b.fechaEntrega.localeCompare(a.fechaEntrega));
@@ -3861,6 +4170,86 @@ function openClienteDetalle(nombre) {
       <button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button>
     </div>
   `);
+}
+
+function clienteCard(c) {
+  const cantPedidos = c.pedidos.length;
+  const entregados = c.pedidos.filter(p => p.estado === 'done').length;
+  const debe = c.totalAdeudado > 0;
+  return `
+    <div class="cliente-card anim-in" style="${debe ? 'border:1.5px solid var(--red-light)' : ''}" onclick="openClienteDetalle('${c.nombre.replace(/'/g,"\'")}')">
+      <div class="cliente-card-header">
+        <div class="cliente-card-name">👤 ${c.nombre}</div>
+        <div style="font-weight:700;color:var(--accent)">${fmt(c.totalGastado)}</div>
+      </div>
+      ${debe ? `<div style="margin:4px 0"><span class="badge badge-unpaid">Debe ${fmt(c.totalAdeudado)}</span></div>` : ''}
+      <div class="cliente-card-stats">
+        <span class="cliente-stat">📦 ${cantPedidos} pedido${cantPedidos !== 1 ? 's' : ''}</span>
+        <span class="cliente-stat">✅ ${entregados} entregado${entregados !== 1 ? 's' : ''}</span>
+        <span class="cliente-stat">📅 Último: ${fmtDate(c.ultimoPedido)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function openClienteDetalle(nombre) {
+  const c = getClientes().find(x => x.nombre === nombre);
+  if (!c) return;
+  const pedidosOrdenados = [...c.pedidos].sort((a, b) => b.fechaEntrega.localeCompare(a.fechaEntrega));
+  openModal(`
+    <div class="modal-title">👤 ${c.nombre}</div>
+    <div class="summary-grid" style="margin-bottom:16px">
+      <div class="summary-card">
+        <div class="label">Pedidos</div>
+        <div class="amount" style="color:var(--accent)">${c.pedidos.length}</div>
+      </div>
+      <div class="summary-card income">
+        <div class="label">Total gastado</div>
+        <div class="amount">${fmt(c.totalGastado)}</div>
+      </div>
+      <div class="summary-card ${c.totalAdeudado > 0 ? 'expense' : ''}">
+        <div class="label">Debe</div>
+        <div class="amount">${fmt(c.totalAdeudado)}</div>
+      </div>
+    </div>
+    ${c.totalAdeudado > 0 ? `
+      <div class="flex gap-8 mb-12" style="align-items:center">
+        <span class="badge badge-unpaid">⚠️ Saldo pendiente: ${fmt(c.totalAdeudado)}</span>
+        <button class="btn btn-secondary btn-sm" onclick="marcarTodosPagados('${c.nombre.replace(/'/g,"\'")}')">💰 Marcar todos como pagados</button>
+      </div>
+    ` : ''}
+    <div style="font-weight:600;font-size:14px;margin-bottom:10px;color:var(--text)">Historial de pedidos</div>
+    ${pedidosOrdenados.map(p => `
+      <div class="finance-item" style="margin-bottom:8px">
+        <div class="finance-dot income">📦</div>
+        <div class="finance-info">
+          <div class="finance-desc">${p.producto}</div>
+          <div class="finance-date">${fmtDate(p.fechaEntrega)} · <span class="badge ${estadoBadge(p.estado)}">${estadoLabel(p.estado)}</span> ${!p.pagado ? '<span class="badge badge-unpaid">Sin pago</span>' : ''}</div>
+        </div>
+        <div class="finance-amount income">${fmt(p.precio)}</div>
+      </div>
+    `).join('')}
+    <div class="modal-actions">
+      <button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button>
+    </div>
+  `);
+}
+
+function marcarTodosPagados(nombre) {
+  const pendientes = state.pedidos.filter(p => p.cliente.trim() === nombre && !p.pagado);
+  if (pendientes.length === 0) return;
+  const total = pendientes.reduce((s, p) => s + (p.precio || 0), 0);
+  showConfirm(
+    '¿Marcar todo como pagado?',
+    `Se marcarán ${pendientes.length} pedido${pendientes.length !== 1 ? 's' : ''} de ${nombre} como pagados (${fmt(total)}).`,
+    () => {
+      pendientes.forEach(p => { p.pagado = true; persistItem('pedidos', p); });
+      saveState();
+      closeModal();
+      showToast('💰 Pagos registrados');
+      renderScreen(activeScreen);
+    }
+  );
 }
 
 /* ============================================================

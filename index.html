@@ -1565,7 +1565,8 @@ function marcarEntregado(id, fromDash) {
     state.movimientos.unshift({
       id: nextId(), tipo: 'income',
       descripcion: `${p.producto} - ${p.cliente}`,
-      monto: p.precio, fecha: todayStr(), auto: true
+      monto: p.precio, fecha: todayStr(), auto: true,
+      pedidoId: p.id
     });
   }
   saveState();
@@ -3154,6 +3155,30 @@ function calcularCostoReceta(receta) {
   };
 }
 
+// Calcula la ganancia real de un pedido ya cerrado: precio cobrado - costo real de sus items
+function calcularGananciaPedido(p) {
+  if (!p || !p.items || p.items.length === 0) return null;
+  let costoTotal = 0;
+  let algunaReceta = false;
+  p.items.forEach(item => {
+    const esItemPorcion = esPorcion(item.producto);
+    const nombreBase = esItemPorcion ? nombreBaseProducto(item.producto) : item.producto;
+    const receta = state.recetas.find(r => r.producto === nombreBase);
+    if (!receta) return;
+    const costo = calcularCostoReceta(receta);
+    if (!costo) return;
+    algunaReceta = true;
+    let costoUnit = costo.costoRealUnit;
+    if (esItemPorcion) {
+      const porciones = receta.porcionesPorUnidad || 1;
+      costoUnit = costoUnit / porciones;
+    }
+    costoTotal += costoUnit * item.cantidad;
+  });
+  if (!algunaReceta) return null; // ningún item tiene receta cargada, no podemos calcular
+  return p.precio - costoTotal;
+}
+
 // Compara costo real vs precio de catálogo para un producto
 function calcularMargenProducto(nombreProducto) {
   const receta = state.recetas.find(r => r.producto === nombreProducto);
@@ -3342,6 +3367,14 @@ function renderFinanzas() {
       const ingDia = items.filter(m=>m.tipo==='income').reduce((s,m)=>s+m.monto,0);
       const egDia  = items.filter(m=>m.tipo==='expense').reduce((s,m)=>s+m.monto,0);
       const saldoDia = ingDia - egDia;
+      let gananciaDia = 0, hayGanancia = false;
+      items.forEach(m => {
+        if (m.tipo === 'income' && m.pedidoId) {
+          const pedido = state.pedidos.find(x => x.id === m.pedidoId);
+          const g = pedido ? calcularGananciaPedido(pedido) : null;
+          if (g !== null) { gananciaDia += g; hayGanancia = true; }
+        }
+      });
       const expandido = finanzasDiaExpandido === fecha;
       return `
         <div style="margin-bottom:10px">
@@ -3361,7 +3394,10 @@ function renderFinanzas() {
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-weight:700;font-size:15px;color:${saldoDia>=0?'var(--green)':'var(--red)'}">${saldoDia>=0?'+':''}${fmt(saldoDia)}</span>
+              <div style="text-align:right">
+                <div style="font-weight:700;font-size:15px;color:${saldoDia>=0?'var(--green)':'var(--red)'}">${saldoDia>=0?'+':''}${fmt(saldoDia)}</div>
+                ${hayGanancia ? `<div style="font-size:11px;font-weight:600;color:var(--text3)">(${gananciaDia>=0?'+':''}${fmt(gananciaDia)} ganancia)</div>` : ''}
+              </div>
               <span style="color:var(--text3);font-size:18px;transition:transform .2s;${expandido?'transform:rotate(90deg)':''}">›</span>
             </div>
           </div>
@@ -3418,6 +3454,15 @@ function toggleDiaFinanza(fecha) {
 }
 
 function finanzaItem(m) {
+  let gananciaHtml = '';
+  if (m.tipo === 'income' && m.pedidoId) {
+    const pedido = state.pedidos.find(x => x.id === m.pedidoId);
+    const ganancia = pedido ? calcularGananciaPedido(pedido) : null;
+    if (ganancia !== null) {
+      const color = ganancia >= 0 ? 'var(--green)' : 'var(--red)';
+      gananciaHtml = `<div style="font-size:11px;font-weight:600;color:${color};margin-top:1px;text-align:right">(${ganancia>=0?'+':''}${fmt(ganancia)} ganancia)</div>`;
+    }
+  }
   return `
     <div class="finance-item anim-in" style="cursor:pointer" onclick="openEditMovimiento(${m.id})">
       <div class="finance-dot ${m.tipo}">${m.tipo==='income'?'⬆️':'⬇️'}</div>
@@ -3426,7 +3471,10 @@ function finanzaItem(m) {
         <div class="finance-date">${fmtDate(m.fecha)}</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
-        <div class="finance-amount ${m.tipo}">${m.tipo==='income'?'+':'-'}${fmt(m.monto)}</div>
+        <div>
+          <div class="finance-amount ${m.tipo}" style="text-align:right">${m.tipo==='income'?'+':'-'}${fmt(m.monto)}</div>
+          ${gananciaHtml}
+        </div>
         <button class="btn btn-ghost btn-sm" style="padding:4px 8px;font-size:13px" onclick="event.stopPropagation();openEditMovimiento(${m.id})">✏️</button>
       </div>
     </div>

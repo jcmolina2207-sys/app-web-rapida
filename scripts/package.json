@@ -1,0 +1,13 @@
+{
+  "name": "toque-artesano-notificaciones",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Script que corre en GitHub Actions y manda notificaciones push (FCM) para pedidos próximos a entregar.",
+  "main": "send-notifications.js",
+  "scripts": {
+    "start": "node send-notifications.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0"
+  }
+}

@@ -12,6 +12,7 @@
 <!-- Firebase SDK -->
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging-compat.js"></script>
 <style>
   /* ============================
      CSS VARIABLES & RESET
@@ -969,6 +970,12 @@ const db = firebase.firestore();
 db.enablePersistence({ synchronizeTabs: true }).catch(err => {
   console.warn('No se pudo habilitar persistencia offline:', err.code);
 });
+
+// ---- Firebase Cloud Messaging (push real, funciona con la app cerrada) ----
+// Generar esta clave gratis en: Firebase Console → Configuración del proyecto
+// → Cloud Messaging → "Certificados push web" → Generar par de claves.
+const FCM_VAPID_KEY = "BE3yHu_rwAlrxLoTXdfakYsnta_-0-GckQCSQzb9WjslhAT4BBVkVx-WwYLQPlmlNgYZZjcZJ1bjyQCq_Ww0akg";
+const messaging = firebase.messaging.isSupported() ? firebase.messaging() : null;
 
 /* ============================================================
    ESTADO GLOBAL + SINCRONIZACIÓN FIREBASE
@@ -4679,6 +4686,54 @@ async function requestNotificationPermission() {
   }
 }
 
+/* ------------------------------------------------------------
+   Token FCM — necesario para que GitHub Actions le pueda mandar
+   push a este dispositivo. Se guarda en Firestore, colección
+   "dispositivos", con el token como ID del documento.
+------------------------------------------------------------ */
+async function registrarTokenFCM() {
+  if (!messaging) {
+    console.warn('[FCM] Este navegador no soporta Firebase Messaging');
+    return null;
+  }
+  if (Notification.permission !== 'granted') return null;
+  if (!FCM_VAPID_KEY || FCM_VAPID_KEY.startsWith('PEGA-ACA')) {
+    console.warn('[FCM] Falta configurar FCM_VAPID_KEY en index.html');
+    return null;
+  }
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const token = await messaging.getToken({
+      vapidKey: FCM_VAPID_KEY,
+      serviceWorkerRegistration: reg,
+    });
+    if (!token) {
+      console.warn('[FCM] No se obtuvo token');
+      return null;
+    }
+    await db.collection('dispositivos').doc(token).set({
+      token,
+      plataforma: navigator.userAgent,
+      actualizado: Date.now(),
+    });
+    console.log('[FCM] Token registrado en Firestore');
+    return token;
+  } catch (e) {
+    console.error('[FCM] Error obteniendo/guardando token:', e);
+    return null;
+  }
+}
+
+// Mensajes FCM que llegan con la pestaña ABIERTA y en foco no se muestran
+// solos (eso solo pasa en background); los mostramos a mano acá.
+if (messaging) {
+  messaging.onMessage(payload => {
+    const title = payload.notification?.title || payload.data?.title;
+    const body = payload.notification?.body || payload.data?.body || '';
+    if (title) sendNotification(title, body);
+  });
+}
+
 function sendNotification(title, body) {
   if (Notification.permission !== 'granted') {
     console.warn('Notificaciones no habilitadas');
@@ -4761,6 +4816,7 @@ async function activarNotificaciones() {
   if (Notification.permission === 'granted') {
     programarNotificacionDiaria();
     programarAlertas1Hora();
+    registrarTokenFCM();
   }
   updateBellIcon();
   renderInicio();
@@ -4797,7 +4853,11 @@ function updateBellIcon() {
   }
 }
 
-// Programar alertas 1 hora antes de cada pedido del día
+// Alertas 1h/15min antes de cada pedido: YA NO se programan acá con
+// setTimeout local (eso es lo que se perdía si el navegador quedaba
+// inactivo). Ahora las manda el workflow de GitHub Actions vía FCM
+// push real — ver scripts/send-notifications.js — y esta función solo
+// se ocupa del recordatorio de notas del día.
 function programarAlertas1Hora() {
   if (Notification.permission !== 'granted') return;
 
@@ -4805,56 +4865,8 @@ function programarAlertas1Hora() {
   if (window._pedidoTimers) window._pedidoTimers.forEach(t => clearTimeout(t));
   window._pedidoTimers = [];
 
-  const hoy = todayStr();
   const ahora = new Date();
   let programados = 0;
-
-  state.pedidos.forEach(p => {
-    if (p.estado === 'done' || p.fechaEntrega !== hoy) return;
-
-    const horaEntrega = p.hora || '12:00';
-    const [hh, mm] = horaEntrega.split(':').map(Number);
-
-    // Construir fecha/hora exacta de entrega HOY
-    const entrega = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate(), hh, mm, 0, 0);
-    // Alerta = 1 hora antes de la entrega
-    const alerta1h = new Date(entrega.getTime() - 60 * 60 * 1000);
-    // Alerta = 15 minutos antes (por si la de 1h ya pasó)
-    const alerta15m = new Date(entrega.getTime() - 15 * 60 * 1000);
-
-    const ms1h = alerta1h.getTime() - ahora.getTime();
-    const ms15m = alerta15m.getTime() - ahora.getTime();
-
-    console.log(`📦 "${p.cliente}" entrega ${horaEntrega} → 1h antes en ${Math.round(ms1h/60000)}min · 15m antes en ${Math.round(ms15m/60000)}min`);
-
-    // Programar alerta de 1 hora antes
-    if (ms1h > 0) {
-      scheduleNotifViaSW(
-        `pedido-1h-${p.id}`,
-        `⏰ Pedido en 1 hora — ${p.cliente}`,
-        `${p.producto} · Entrega a las ${horaEntrega}`,
-        alerta1h.getTime()
-      );
-      programados++;
-      console.log(`  ↳ Alerta 1h programada en ${Math.round(ms1h/60000)} min`);
-    }
-
-    // Programar alerta de 15 minutos antes
-    if (ms15m > 0) {
-      scheduleNotifViaSW(
-        `pedido-15m-${p.id}`,
-        `🚨 Pedido en 15 min — ${p.cliente}`,
-        `${p.producto} · Entrega a las ${horaEntrega}`,
-        alerta15m.getTime()
-      );
-      programados++;
-      console.log(`  ↳ Alerta 15m programada en ${Math.round(ms15m/60000)} min`);
-    }
-
-    if (ms1h <= 0 && ms15m <= 0) {
-      console.log(`  ↳ Ya pasó la hora de entrega, no se programa`);
-    }
-  });
 
   // Notas del día — recordatorio a las 11pm
   const notasHoy = getNotasHoy();
@@ -5022,6 +5034,7 @@ registrarSW().then(() => {
     if (Notification.permission === 'granted') {
       programarNotificacionDiaria();
       programarAlertas1Hora();
+      registrarTokenFCM(); // refresca el token por si cambió
     }
     updateBellIcon();
   });

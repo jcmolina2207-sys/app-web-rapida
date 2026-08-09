@@ -241,6 +241,15 @@
   .badge-done    { background: var(--green-light);  color: var(--green); }
   .badge-paid    { background: var(--green-light);  color: var(--green); }
   .badge-unpaid  { background: var(--red-light);    color: var(--red); }
+  .badge-partial { background: var(--yellow-light); color: var(--yellow); }
+  .badge-atrasado {
+    background: var(--red); color: #fff;
+    animation: pulseAtrasado 1.6s ease-in-out infinite;
+  }
+  @keyframes pulseAtrasado {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .65; }
+  }
 
   /* ============================
      PROGRESS BARS
@@ -293,6 +302,11 @@
   .list-item.pending::before  { background: var(--yellow); }
   .list-item.prep::before     { background: var(--blue); }
   .list-item.done::before     { background: var(--green); }
+  .list-item.atrasado {
+    border: 1.5px solid var(--red);
+    background: var(--red-light);
+  }
+  .list-item.atrasado::before { background: var(--red); width: 5px; }
 
   .list-item-row { display: flex; align-items: center; justify-content: space-between; }
   .list-item-title { font-weight: 600; font-size: 14px; color: var(--text); }
@@ -1018,6 +1032,9 @@ async function persistItem(colName, item, customDocId) {
     console.error(`persistItem: docId inválido para ${colName}`, item);
     return;
   }
+  // Timestamp por documento: permite decidir, en el merge de carga y en
+  // el listener en tiempo real, qué versión de ESTE registro es más nueva.
+  item._ts = Date.now();
   setSyncStatus('saving');
   try {
     await db.collection(colName).doc(docId).set(item);
@@ -1108,6 +1125,45 @@ function parsePrecio(val) {
   return parseFloat(s) || 0;
 }
 
+// Combina el array local con los docs de Firestore, documento por documento,
+// usando _ts para decidir cuál versión de cada registro es más nueva.
+// Los items que ganan por ser más nuevos localmente se re-suben a Firestore
+// (por si la escritura anterior no había llegado a confirmarse).
+function mergeCollection(colName, localArr, remoteDocs) {
+  const remoteById = new Map();
+  remoteDocs.forEach(d => remoteById.set(d.id, d.data()));
+
+  const localById = new Map();
+  (localArr || []).forEach(item => localById.set(docIdFor(colName, item), item));
+
+  const merged = [];
+  const aRepushear = [];
+  const allIds = new Set([...remoteById.keys(), ...localById.keys()]);
+
+  allIds.forEach(docId => {
+    const remote = remoteById.get(docId);
+    const local = localById.get(docId);
+    if (remote && local) {
+      if ((local._ts || 0) > (remote._ts || 0)) {
+        merged.push(local);
+        aRepushear.push(local);
+      } else {
+        merged.push(remote);
+      }
+    } else if (remote) {
+      merged.push(remote);
+    } else if (local) {
+      // Existe solo en local: probablemente se creó offline o la
+      // escritura a Firestore no llegó a confirmarse. Lo conservamos
+      // y lo re-subimos.
+      merged.push(local);
+      aRepushear.push(local);
+    }
+  });
+
+  return { merged, aRepushear };
+}
+
 // Load all data from Firestore on startup (lee cada subcolección documento por documento)
 async function loadFromFirebase() {
   setSyncStatus('connecting');
@@ -1118,6 +1174,7 @@ async function loadFromFirebase() {
     if (raw) {
       const local = JSON.parse(raw);
       state = { ...state, ...local };
+      (state.pedidos || []).forEach(normalizarPedido);
     }
   } catch(e) {}
 
@@ -1134,7 +1191,10 @@ async function loadFromFirebase() {
     const configDoc = await db.collection('app').doc('config').get();
 
     SYNCED_COLLECTIONS.forEach((c, i) => {
-      state[c] = results[i].docs.map(d => d.data());
+      const { merged, aRepushear } = mergeCollection(c, state[c], results[i].docs);
+      state[c] = merged;
+      if (c === 'pedidos') state.pedidos.forEach(normalizarPedido);
+      aRepushear.forEach(item => persistItem(c, item));
     });
 
     if (metaDoc.exists) {
@@ -1178,7 +1238,6 @@ function seedDatosSofia() {
   const churro = state.recetas.find(r => r.producto === 'Churro simple');
   if (churro && churro.mermaPct === undefined) {
     churro.mermaPct = Math.round((11 / 32) * 1000) / 10; // 34.4%
-    churro.mermaCadaXDias = 15;
     recetaCambiada = churro;
     cambio = true;
   }
@@ -1215,7 +1274,19 @@ function setupRealtimeSync() {
         if (change.type === 'removed') {
           if (idx >= 0) arr.splice(idx, 1);
         } else { // 'added' o 'modified'
-          if (idx >= 0) arr[idx] = data; else arr.push(data);
+          if (colName === 'pedidos') normalizarPedido(data);
+          if (idx >= 0) {
+            const localTs = arr[idx]._ts || 0;
+            const remoteTs = data._ts || 0;
+            // Si el registro local es más nuevo que lo que llegó del listener,
+            // significa que se acaba de editar en ESTE dispositivo y ese
+            // snapshot todavía no lo refleja (o es un eco viejo) — no lo pisamos.
+            if (remoteTs >= localTs) {
+              arr[idx] = data;
+            }
+          } else {
+            arr.push(data);
+          }
         }
       });
 
@@ -1250,6 +1321,24 @@ function todayStr() {
   const d = String(now.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
 }
+// Suma (o resta, con negativos) días a una fecha "YYYY-MM-DD" y devuelve otra "YYYY-MM-DD"
+function addDiasStr(fechaStr, dias) {
+  const [y, m, d] = fechaStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + dias);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+// Diferencia en días (entero) entre una fecha "YYYY-MM-DD" y hoy. Positivo = futuro, negativo = pasado.
+function diffDiasDesdeHoy(fechaStr) {
+  const [y, m, d] = fechaStr.split('-').map(Number);
+  const fecha = new Date(y, m - 1, d);
+  const now = new Date();
+  const hoyLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((fecha - hoyLocal) / 86400000);
+}
 function stockPct(ing) {
   return Math.min(100, Math.round((ing.stock / ing.ideal) * 100));
 }
@@ -1267,7 +1356,33 @@ function totalSaldo() {
   return state.movimientos.reduce((s, m) => m.tipo === 'income' ? s + m.monto : s - m.monto, 0);
 }
 function totalPorCobrar() {
-  return state.pedidos.filter(p => !p.pagado).reduce((s, p) => s + (p.precio || 0), 0);
+  return state.pedidos.reduce((s, p) => s + saldoPendiente(p), 0);
+}
+// ---- Helpers de pago parcial (montoPagado vs precio) ----
+// Convierte pedidos viejos (pagado:true/false) al nuevo campo montoPagado.
+function normalizarPedido(p) {
+  if (p && p.montoPagado === undefined) {
+    p.montoPagado = p.pagado ? (p.precio || 0) : 0;
+  }
+  return p;
+}
+function montoPagadoDe(p) {
+  return Number(p.montoPagado) || 0;
+}
+function saldoPendiente(p) {
+  return Math.max(0, (p.precio || 0) - montoPagadoDe(p));
+}
+function estaPagadoCompleto(p) {
+  const precio = p.precio || 0;
+  return precio > 0 && montoPagadoDe(p) >= precio;
+}
+// Devuelve { label, badge } listo para mostrar en un <span class="badge ...">
+function estadoPagoInfo(p) {
+  const pagado = montoPagadoDe(p);
+  const precio = p.precio || 0;
+  if (pagado <= 0) return { label: 'Sin pago', badge: 'badge-unpaid' };
+  if (pagado >= precio) return { label: '✓ Pagado', badge: 'badge-paid' };
+  return { label: `Seña: ${fmt(pagado)} de ${fmt(precio)}`, badge: 'badge-partial' };
 }
 function totalIngresos() {
   return state.movimientos.filter(m => m.tipo === 'income').reduce((s, m) => s + m.monto, 0);
@@ -1293,6 +1408,12 @@ function nextPedido() {
   const activos = state.pedidos.filter(p => p.estado !== 'done');
   activos.sort((a, b) => (a.fechaEntrega + a.hora).localeCompare(b.fechaEntrega + b.hora));
   return activos[0] || null;
+}
+function esAtrasado(p) {
+  return p.estado !== 'done' && p.fechaEntrega < todayStr();
+}
+function pedidosAtrasados() {
+  return state.pedidos.filter(esAtrasado);
 }
 function lastNota() {
   const sorted = [...state.notas].sort((a,b) => b.fecha.localeCompare(a.fecha));
@@ -1389,7 +1510,7 @@ function handleImportFile(event) {
       '¿Restaurar backup?',
       'Esto va a REEMPLAZAR todos los datos actuales (pedidos, ingredientes, movimientos, notas, recetas, catálogo, gastos fijos y configuración) por los del archivo. No se puede deshacer.',
       async () => {
-        state.pedidos = data.pedidos || [];
+        state.pedidos = (data.pedidos || []).map(normalizarPedido);
         state.ingredientes = data.ingredientes || [];
         state.movimientos = data.movimientos || [];
         state.notas = data.notas || [];
@@ -1548,9 +1669,11 @@ function renderInicio() {
     <div class="dash-greeting">¡Hola Sofi! 👋</div>
     <div class="dash-date">${fechaLarga}</div>
     ${renderNotifBanner()}
+    ${renderAtrasadosBanner()}
+    ${renderGastosFijosBanner()}
     <div class="dash-grid">
     <!-- PRÓXIMO PEDIDO -->
-    <div class="card anim-in">
+    <div class="card anim-in" style="${prox && esAtrasado(prox) ? 'border:1.5px solid var(--red);background:var(--red-light)' : ''}">
       <div class="card-header">
         <div class="card-title"><span class="card-icon">📦</span> Próximo pedido</div>
       </div>
@@ -1558,8 +1681,9 @@ function renderInicio() {
         <div class="list-item-title">${prox.cliente}</div>
         <div class="list-item-sub mb-8">${prox.producto}</div>
         <div class="flex gap-8 mb-12" style="flex-wrap:wrap">
+          ${esAtrasado(prox) ? `<span class="badge badge-atrasado">⚠️ Atrasado</span>` : ''}
           <span class="badge ${estadoBadge(prox.estado)}">${estadoLabel(prox.estado)}</span>
-          <span class="badge ${prox.pagado ? 'badge-paid' : 'badge-unpaid'}">${prox.pagado ? '✓ Pagado' : 'Sin pago'}</span>
+          <span class="badge ${estadoPagoInfo(prox).badge}">${estadoPagoInfo(prox).label}</span>
           <span class="text-sm text-muted">📅 ${fmtDate(prox.fechaEntrega)} ${prox.hora}</span>
         </div>
         <div class="flex gap-8">
@@ -1613,7 +1737,7 @@ function renderInicio() {
       </div>
       <div class="dash-saldo-big" style="color:${totalPorCobrar()>0?'var(--red)':'var(--text)'}">${fmt(totalPorCobrar())}</div>
       <div class="text-sm text-muted mb-12">
-        ${totalPorCobrar() > 0 ? `📌 ${state.pedidos.filter(p=>!p.pagado).length} pedido${state.pedidos.filter(p=>!p.pagado).length !== 1 ? 's' : ''} sin cobrar` : '✅ Todo cobrado'}
+        ${totalPorCobrar() > 0 ? `📌 ${state.pedidos.filter(p=>!estaPagadoCompleto(p)).length} pedido${state.pedidos.filter(p=>!estaPagadoCompleto(p)).length !== 1 ? 's' : ''} sin cobrar` : '✅ Todo cobrado'}
       </div>
       <button class="btn btn-secondary btn-sm" onclick="navigate('clientes')">Ver clientes</button>
     </div>
@@ -1625,7 +1749,7 @@ function renderInicio() {
       </div>
       <div class="dash-saldo-big" style="color:${totalPorCobrar()>0?'var(--red)':'var(--text)'}">${fmt(totalPorCobrar())}</div>
       <div class="text-sm text-muted mb-12">
-        ${totalPorCobrar() > 0 ? `📌 ${state.pedidos.filter(p=>!p.pagado).length} pedido${state.pedidos.filter(p=>!p.pagado).length !== 1 ? 's' : ''} sin cobrar` : '✅ Todo cobrado'}
+        ${totalPorCobrar() > 0 ? `📌 ${state.pedidos.filter(p=>!estaPagadoCompleto(p)).length} pedido${state.pedidos.filter(p=>!estaPagadoCompleto(p)).length !== 1 ? 's' : ''} sin cobrar` : '✅ Todo cobrado'}
       </div>
       <button class="btn btn-secondary btn-sm" onclick="navigate('clientes')">Ver clientes</button>
     </div>
@@ -1648,15 +1772,26 @@ function renderInicio() {
 /* -------- PEDIDOS -------- */
 let pedidoFiltroEstado = 'all';
 let pedidoFiltroPago = 'all';
+let pedidoVistaAgenda = false;   // false = Lista, true = Agenda semanal
+let agendaInicio = todayStr();   // fecha ISO del primer día visible en la agenda
 
 function renderPedidos() {
   const el = document.getElementById('screen-pedidos');
 
   let filtrados = state.pedidos;
   if (pedidoFiltroEstado !== 'all') filtrados = filtrados.filter(p => p.estado === pedidoFiltroEstado);
-  if (pedidoFiltroPago !== 'all') filtrados = filtrados.filter(p => pedidoFiltroPago === 'paid' ? p.pagado : !p.pagado);
+  if (pedidoFiltroPago !== 'all') {
+    filtrados = filtrados.filter(p => {
+      if (pedidoFiltroPago === 'paid') return estaPagadoCompleto(p);
+      if (pedidoFiltroPago === 'partial') return montoPagadoDe(p) > 0 && !estaPagadoCompleto(p);
+      return montoPagadoDe(p) <= 0; // 'unpaid'
+    });
+  }
 
   const sorted = [...filtrados].sort((a, b) => {
+    const aAtr = esAtrasado(a) ? 1 : 0;
+    const bAtr = esAtrasado(b) ? 1 : 0;
+    if (aAtr !== bAtr) return bAtr - aAtr; // atrasados primero
     return (b.fechaEntrega + b.hora).localeCompare(a.fechaEntrega + a.hora);
   });
 
@@ -1712,13 +1847,32 @@ function renderPedidos() {
           onchange="setPedidoFiltroPago(this.value)">
           <option value="all" ${pedidoFiltroPago==='all'?'selected':''}>Pago: Todos</option>
           <option value="paid" ${pedidoFiltroPago==='paid'?'selected':''}>Pagado</option>
+          <option value="partial" ${pedidoFiltroPago==='partial'?'selected':''}>Con seña</option>
           <option value="unpaid" ${pedidoFiltroPago==='unpaid'?'selected':''}>Debe</option>
         </select>
       </div>
     </div>
 
-    ${sorted.length === 0 ? `<div class="empty-state"><div class="empty-icon">📦</div><p>Sin pedidos en esta categoría</p></div>` :
-      `<div class="list-2col">${sorted.map(p => pedidoCard(p)).join('')}</div>`
+    <div style="display:flex;align-items:center;justify-content:flex-end;margin-bottom:12px">
+      <div style="display:flex;gap:6px">
+        <div onclick="setPedidoVista(false)"
+          style="padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;
+            border:2px solid ${!pedidoVistaAgenda?'var(--accent)':'var(--border)'};
+            background:${!pedidoVistaAgenda?'var(--accent-light)':'var(--surface)'};
+            color:${!pedidoVistaAgenda?'var(--accent)':'var(--text2)'}">Lista</div>
+        <div onclick="setPedidoVista(true)"
+          style="padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;
+            border:2px solid ${pedidoVistaAgenda?'var(--accent)':'var(--border)'};
+            background:${pedidoVistaAgenda?'var(--accent-light)':'var(--surface)'};
+            color:${pedidoVistaAgenda?'var(--accent)':'var(--text2)'}">Agenda</div>
+      </div>
+    </div>
+
+    ${pedidoVistaAgenda
+      ? renderPedidosAgenda(filtrados)
+      : (sorted.length === 0
+          ? `<div class="empty-state"><div class="empty-icon">📦</div><p>Sin pedidos en esta categoría</p></div>`
+          : `<div class="list-2col">${sorted.map(p => pedidoCard(p)).join('')}</div>`)
     }
     <div style="height:8px"></div>
   `;
@@ -1726,22 +1880,128 @@ function renderPedidos() {
 function setPedidoFiltroEstado(f) { pedidoFiltroEstado = f; renderPedidos(); }
 function setPedidoFiltroPago(f) { pedidoFiltroPago = f; renderPedidos(); }
 function setPedidoFiltro(f) { pedidoFiltroEstado = f; renderPedidos(); }
+function setPedidoVista(agenda) { pedidoVistaAgenda = agenda; renderPedidos(); }
 
 function pedidoCard(p) {
+  const atrasado = esAtrasado(p);
   return `
-    <div class="list-item ${estadoClass(p.estado)} anim-in" onclick="openPedidoDetalle(${p.id})">
+    <div class="list-item ${estadoClass(p.estado)} ${atrasado ? 'atrasado' : ''} anim-in" onclick="openPedidoDetalle(${p.id})">
       <div class="list-item-row">
         <div class="list-item-title">${p.cliente}</div>
         <div style="font-weight:700;color:var(--accent)">${fmt(p.precio)}</div>
       </div>
       <div class="list-item-sub">${p.producto} · x${p.cantidad}</div>
       <div class="list-item-meta">
+        ${atrasado ? `<span class="badge badge-atrasado">⚠️ Atrasado</span>` : ''}
         <span class="badge ${estadoBadge(p.estado)}">${estadoLabel(p.estado)}</span>
-        <span class="badge ${p.pagado ? 'badge-paid':'badge-unpaid'}">${p.pagado ? '✓ Pago':'Sin pago'}</span>
+        <span class="badge ${estadoPagoInfo(p).badge}">${estadoPagoInfo(p).label}</span>
         <span class="text-sm text-muted">📅 ${fmtDate(p.fechaEntrega)} ${p.hora}</span>
       </div>
     </div>
   `;
+}
+/* -------- AGENDA SEMANAL (Pedidos) -------- */
+function semanaDias(inicio) {
+  // Devuelve un array de 7 fechas ISO empezando en `inicio`
+  return Array.from({ length: 7 }, (_, i) => addDiasStr(inicio, i));
+}
+function cambiarSemanaAgenda(dias) {
+  agendaInicio = addDiasStr(agendaInicio, dias);
+  renderPedidos();
+}
+function irHoyAgenda() {
+  agendaInicio = todayStr();
+  renderPedidos();
+}
+function diaSemanaLabel(fechaStr) {
+  const [y, m, d] = fechaStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  const dias = ['dom','lun','mar','mié','jue','vie','sáb'];
+  return dias[dt.getDay()];
+}
+function estadoColorVar(e) {
+  return { pending: 'var(--yellow)', prep: 'var(--blue)', done: 'var(--green)' }[e] || 'var(--border)';
+}
+
+function renderPedidosAgenda(filtrados) {
+  const dias = semanaDias(agendaInicio);
+  const hoy = todayStr();
+
+  const cols = dias.map(fecha => {
+    const pedidosDia = filtrados
+      .filter(p => p.fechaEntrega === fecha)
+      .sort((a, b) => (a.hora || '').localeCompare(b.hora || ''));
+    const esHoy = fecha === hoy;
+    return `
+      <div style="flex:0 0 150px;scroll-snap-align:start">
+        <div style="text-align:center;padding:8px 4px;border-radius:var(--radius-sm) var(--radius-sm) 0 0;
+          background:${esHoy ? 'var(--accent-light)' : 'var(--surface2)'};
+          border:1px solid var(--border);border-bottom:none">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:${esHoy ? 'var(--accent)' : 'var(--text3)'}">${diaSemanaLabel(fecha)}</div>
+          <div style="font-size:15px;font-weight:800;color:${esHoy ? 'var(--accent)' : 'var(--text)'}">${fecha.slice(8,10)}</div>
+        </div>
+        <div style="border:1px solid var(--border);border-radius:0 0 var(--radius-sm) var(--radius-sm);
+          min-height:120px;padding:6px;display:flex;flex-direction:column;gap:6px;background:var(--surface)">
+          ${pedidosDia.length === 0
+            ? `<div style="text-align:center;color:var(--text3);font-size:11px;padding:16px 4px">Sin pedidos</div>`
+            : pedidosDia.map(p => pedidoCardMini(p)).join('')}
+        </div>
+      </div>`;
+  }).join('');
+
+  const rango = `${fmtDate(dias[0])} – ${fmtDate(dias[6])}`;
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="cambiarSemanaAgenda(-7)">‹ Anterior</button>
+      <div style="text-align:center">
+        <div style="font-size:12px;font-weight:700;color:var(--text2)">${rango}</div>
+        <div onclick="irHoyAgenda()" style="font-size:11px;color:var(--accent);cursor:pointer;font-weight:700">Ir a hoy</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="cambiarSemanaAgenda(7)">Siguiente ›</button>
+    </div>
+    <div style="display:flex;gap:8px;overflow-x:auto;scroll-snap-type:x proximity;padding-bottom:8px;-webkit-overflow-scrolling:touch">
+      ${cols}
+    </div>
+  `;
+}
+
+function pedidoCardMini(p) {
+  const atrasado = esAtrasado(p);
+  return `
+    <div class="anim-in" onclick="openPedidoDetalle(${p.id})"
+      style="cursor:pointer;background:var(--surface);border:1px solid var(--border);
+        border-left:3px solid ${estadoColorVar(p.estado)};border-radius:6px;padding:6px 8px;
+        ${atrasado ? 'outline:1px solid var(--red)' : ''}">
+      <div style="font-size:11px;font-weight:700;color:var(--text)">${p.hora || '--:--'}</div>
+      <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.cliente}</div>
+      <div style="font-size:10px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.producto}</div>
+      ${atrasado ? `<div style="font-size:9px;color:var(--red);font-weight:700">⚠️ Atrasado</div>` : ''}
+    </div>
+  `;
+}
+function compartirPedidoWhatsApp(id) {
+  const p = state.pedidos.find(x => x.id === id);
+  if (!p) return;
+
+  const itemsTexto = p.items && p.items.length > 0
+    ? p.items.map(i => `• ${i.producto} x${i.cantidad} — ${fmt(i.subtotal)}`).join('\n')
+    : `• ${p.producto}`;
+
+  const mensaje =
+`🧁 *Pedido - Toque Artesano de Sofi*
+
+👤 Cliente: ${p.cliente}
+
+${itemsTexto}
+
+💰 Total: ${fmt(p.precio)}
+📅 Entrega: ${fmtDate(p.fechaEntrega)} ⏰ ${p.hora}${p.notas ? `\n📝 Notas: ${p.notas}` : ''}
+
+¡Gracias por tu pedido! 💕`;
+
+  const url = `https://wa.me/?text=${encodeURIComponent(mensaje)}`;
+  window.open(url, '_blank');
 }
 
 function openPedidoDetalle(id) {
@@ -1758,12 +2018,13 @@ function openPedidoDetalle(id) {
     <div class="detail-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:10px"><span class="label fw-600">Total</span><span class="value fw-600" style="color:var(--accent)">${fmt(p.precio)}</span></div>
     <div class="detail-row"><span class="label">Entrega</span><span class="value">${fmtDate(p.fechaEntrega)} ${p.hora}</span></div>
     <div class="detail-row"><span class="label">Estado</span><span class="badge ${estadoBadge(p.estado)}">${estadoLabel(p.estado)}</span></div>
-    <div class="detail-row"><span class="label">Pago</span><span class="badge ${p.pagado ? 'badge-paid':'badge-unpaid'}">${p.pagado ? '✓ Recibido':'Pendiente'}</span></div>
+    <div class="detail-row"><span class="label">Pago</span><span class="badge ${estadoPagoInfo(p).badge}">${estadoPagoInfo(p).label}</span></div>
     ${p.notas ? `<div class="detail-row"><span class="label">Notas</span><span class="value" style="max-width:60%;text-align:right;word-break:break-word">${p.notas}</span></div>` : ''}
     <div class="divider"></div>
     <div class="flex gap-8" style="flex-wrap:wrap">
       ${p.estado !== 'done' ? `<button class="btn btn-primary btn-sm" onclick="marcarEntregado(${p.id})">✓ Marcar entregado</button>` : ''}
-      ${!p.pagado ? `<button class="btn btn-secondary btn-sm" onclick="marcarPagado(${p.id})">💰 Pago recibido</button>` : ''}
+      ${!estaPagadoCompleto(p) ? `<button class="btn btn-secondary btn-sm" onclick="openRegistrarPago(${p.id})">💰 Registrar pago</button>` : ''}
+      <button class="btn btn-ghost btn-sm" onclick="compartirPedidoWhatsApp(${p.id})">📱 Compartir por WhatsApp</button>
       <button class="btn btn-ghost btn-sm" onclick="openPedidoForm(${p.id})">✏️ Editar</button>
       <button class="btn btn-danger btn-sm" onclick="confirmEliminarPedido(${p.id})">🗑 Eliminar</button>
     </div>
@@ -1794,14 +2055,43 @@ function marcarEntregado(id, fromDash) {
   renderScreen(activeScreen);
 }
 
-function marcarPagado(id) {
+function openRegistrarPago(id) {
   const p = state.pedidos.find(x => x.id === id);
   if (!p) return;
-  p.pagado = true;
+  const saldo = saldoPendiente(p);
+  openModal(`
+    <div class="modal-title">💰 Registrar pago</div>
+    <div class="detail-row"><span class="label">Cliente</span><span class="value">${p.cliente}</span></div>
+    <div class="detail-row"><span class="label">Total del pedido</span><span class="value">${fmt(p.precio)}</span></div>
+    <div class="detail-row"><span class="label">Ya pagado</span><span class="value">${fmt(montoPagadoDe(p))}</span></div>
+    <div class="detail-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:10px"><span class="label fw-600">Saldo pendiente</span><span class="value fw-600" style="color:var(--red)">${fmt(saldo)}</span></div>
+    <div class="form-group">
+      <label class="form-label">Monto a registrar ($)</label>
+      <input class="form-input" id="f-monto-pago" type="number" min="0.01" step="0.01" value="${saldo}">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="openPedidoDetalle(${p.id})">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="registrarPago(${p.id})">💰 Registrar</button>
+    </div>
+  `);
+  setTimeout(() => {
+    const el = document.getElementById('f-monto-pago');
+    if (el) { el.focus(); el.select(); }
+  }, 50);
+}
+
+function registrarPago(id) {
+  const p = state.pedidos.find(x => x.id === id);
+  if (!p) return;
+  const input = document.getElementById('f-monto-pago');
+  const monto = Number(input?.value);
+  if (!monto || monto <= 0) { showToast('⚠️ Ingresá un monto válido'); return; }
+  p.montoPagado = montoPagadoDe(p) + monto;
+  delete p.pagado; // el booleano viejo queda obsoleto frente a montoPagado
   persistItem('pedidos', p);
   saveState();
   closeModal();
-  showToast('💰 Pago registrado');
+  showToast(estaPagadoCompleto(p) ? '💰 Pago completo registrado' : `💰 Seña registrada · saldo ${fmt(saldoPendiente(p))}`);
   renderScreen(activeScreen);
 }
 
@@ -2187,6 +2477,11 @@ function openPedidoForm(id) {
       </select>
     </div>
     <div class="form-group">
+      <label class="form-label">Seña / monto pagado ($)</label>
+      <input class="form-input" id="f-monto-pagado" type="number" min="0" step="0.01" value="${p ? montoPagadoDe(p) : 0}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Dejalo en 0 si todavía no pagó nada. Para sumar un pago más adelante, usá "Registrar pago" en el detalle del pedido.</div>
+    </div>
+    <div class="form-group">
       <label class="form-label">Notas</label>
       <textarea class="form-input" id="f-notas" placeholder="Detalles adicionales...">${p?.notas||''}</textarea>
     </div>
@@ -2319,6 +2614,146 @@ function quitarItemPedido(idx) {
   renderItemsList();
 }
 
+// Normaliza texto para comparar sin tildes ni mayúsculas (usado por todos los autocompletados)
+function normalizarTexto(str) {
+  return str.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+// Resalta la coincidencia de búsqueda dentro de un texto (usado por todos los autocompletados)
+function highlightMatch(text, query) {
+  if (!query) return text;
+  const re = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+  return text.replace(re, '<mark>$1</mark>');
+}
+
+/**
+ * Autocompletado genérico reutilizable. Centraliza el "plumbing" común a todos los
+ * campos con sugerencias (abrir/cerrar dropdown, reposicionar, blur, teclado) y deja
+ * en manos del caller la parte específica de cada campo: qué opciones mostrar y qué
+ * hacer al elegir una.
+ *
+ * @param {Object} cfg
+ * @param {HTMLInputElement} cfg.input   - input de texto
+ * @param {HTMLElement} cfg.dropdown     - contenedor del dropdown de sugerencias
+ * @param {(query:string)=>string} cfg.renderHTML
+ *        Recibe el texto actual del input (tal cual, sin recortar) y devuelve el HTML
+ *        a poner dentro del dropdown. Si devuelve '' / null / undefined, el dropdown
+ *        se cierra. El caller decide acá el filtrado, agrupamiento, resaltado, mensaje
+ *        de "sin resultados", opción de "agregar nuevo", etc.
+ * @param {string} cfg.optionSelector    - selector CSS de cada opción dentro del HTML (ej: '.cliente-option')
+ * @param {(optionEl:HTMLElement, ev:Event)=>void} cfg.onSelect
+ *        Se ejecuta al elegir una opción (click/mousedown o Enter con navegación por teclado),
+ *        antes de cerrar el dropdown. Acá el caller hace lo suyo: llenar el input, disparar
+ *        efectos secundarios (foco en el siguiente campo, precios, etc).
+ * @param {boolean} [cfg.showOnEmptyFocus=false] - si true, al enfocar se llama a renderHTML aunque el input esté vacío
+ * @param {boolean} [cfg.keyboardNav=false]       - si true, habilita navegación con flechas/Enter/Tab/Escape
+ * @param {number}  [cfg.blurDelay=150]           - ms de espera en blur antes de cerrar (deshabilitado si se usa closeOutsideSelector)
+ * @param {string}  [cfg.closeOutsideSelector]    - si se define, en vez de cerrar por blur, cierra al hacer click fuera de este selector
+ * @param {boolean} [cfg.positionFixed=false]     - si true, posiciona el dropdown con position:fixed siguiendo al input (para modales con overflow recortado)
+ * @param {()=>void} [cfg.onClose]                - callback extra que corre siempre que el dropdown se cierra (por selección, blur o click afuera)
+ */
+function crearAutocomplete(cfg) {
+  const {
+    input, dropdown, renderHTML, optionSelector, onSelect,
+    showOnEmptyFocus = false, keyboardNav = false, blurDelay = 150,
+    closeOutsideSelector = null, positionFixed = false, onClose = null,
+  } = cfg;
+  if (!input || !dropdown) return;
+
+  let currentIndex = -1;
+
+  if (positionFixed) {
+    dropdown.style.position = 'fixed';
+    dropdown.style.zIndex = '9999';
+    dropdown.style.maxHeight = '200px';
+    dropdown.style.overflowY = 'auto';
+    dropdown.style.display = 'none';
+  }
+
+  function positionDropdown() {
+    if (!positionFixed) return;
+    const rect = input.getBoundingClientRect();
+    dropdown.style.left = rect.left + 'px';
+    dropdown.style.top = (rect.bottom + 4) + 'px';
+    dropdown.style.width = rect.width + 'px';
+  }
+
+  function wireOptions() {
+    dropdown.querySelectorAll(optionSelector).forEach(opt => {
+      opt.addEventListener('mousedown', e => {
+        e.preventDefault();
+        onSelect(opt, e);
+        close();
+      });
+    });
+  }
+
+  function open(html) {
+    dropdown.innerHTML = html;
+    dropdown.classList.add('open');
+    if (positionFixed) { positionDropdown(); dropdown.style.display = 'block'; }
+    wireOptions();
+  }
+
+  function close() {
+    dropdown.classList.remove('open');
+    if (positionFixed) dropdown.style.display = 'none';
+    currentIndex = -1;
+    if (onClose) onClose();
+  }
+
+  function show(val) {
+    const html = renderHTML(val);
+    if (!html) { close(); return; }
+    open(html);
+  }
+
+  input.addEventListener('input', () => show(input.value));
+  input.addEventListener('focus', () => { if (input.value || showOnEmptyFocus) show(input.value); });
+
+  if (closeOutsideSelector) {
+    document.addEventListener('click', e => {
+      if (!e.target.closest(closeOutsideSelector)) close();
+    });
+  } else {
+    input.addEventListener('blur', () => setTimeout(close, blurDelay));
+  }
+
+  if (positionFixed) {
+    const modalSheet = document.querySelector('.modal-sheet');
+    if (modalSheet) {
+      modalSheet.addEventListener('scroll', () => {
+        if (dropdown.style.display === 'block') positionDropdown();
+      });
+    }
+  }
+
+  if (keyboardNav) {
+    input.addEventListener('keydown', e => {
+      const options = dropdown.querySelectorAll(optionSelector);
+      if (!dropdown.classList.contains('open') || options.length === 0) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        currentIndex = Math.min(currentIndex + 1, options.length - 1);
+        options.forEach((o, i) => o.classList.toggle('focused', i === currentIndex));
+        options[currentIndex]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        currentIndex = Math.max(currentIndex - 1, 0);
+        options.forEach((o, i) => o.classList.toggle('focused', i === currentIndex));
+        options[currentIndex]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        if (currentIndex >= 0 && options[currentIndex]) {
+          e.preventDefault();
+          options[currentIndex].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        }
+      } else if (e.key === 'Escape') {
+        close();
+      }
+    });
+  }
+}
+
 function initClienteAutocomplete() {
   const input = document.getElementById('f-cliente');
   const dropdown = document.getElementById('cliente-dropdown');
@@ -2329,86 +2764,45 @@ function initClienteAutocomplete() {
     return nombres.sort();
   }
 
-  // Normalizar texto para comparar sin tildes ni mayúsculas
-  function normalizar(str) {
-    return str.toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  }
+  crearAutocomplete({
+    input, dropdown,
+    optionSelector: '.cliente-option',
+    keyboardNav: true,
+    closeOutsideSelector: '.cliente-wrap',
+    renderHTML(filter) {
+      if (!filter) return '';
+      const nombres = getClienteNames();
+      const normFilter = normalizarTexto(filter);
 
-  function showDropdown(filter) {
-    if (!filter) { dropdown.classList.remove('open'); return; }
-    const nombres = getClienteNames();
-    const normFilter = normalizar(filter);
+      // Filtrar Y deduplicar por nombre normalizado
+      const vistos = new Set();
+      const filtrados = [];
+      nombres.forEach(n => {
+        const norm = normalizarTexto(n);
+        if (norm.includes(normFilter) && !vistos.has(norm)) {
+          vistos.add(norm);
+          filtrados.push(n);
+        }
+      });
 
-    // Filtrar Y deduplicar por nombre normalizado
-    const vistos = new Set();
-    const filtrados = [];
-    nombres.forEach(n => {
-      const norm = normalizar(n);
-      if (norm.includes(normFilter) && !vistos.has(norm)) {
-        vistos.add(norm);
-        filtrados.push(n);
-      }
-    });
+      if (filtrados.length === 0) return '';
 
-    if (filtrados.length === 0) {
-      dropdown.classList.remove('open');
-      return;
-    }
-    const clientes = getClientes();
-    dropdown.innerHTML = filtrados.map(n => {
-      // Buscar cliente normalizando también
-      const c = clientes.find(x => normalizar(x.nombre) === normalizar(n));
-      const cant = c ? c.pedidos.length : 1;
-      const meta = `(${cant} pedido${cant !== 1 ? 's' : ''})`;
-      return `<div class="cliente-option" onclick="seleccionarCliente('${n.replace(/'/g,"\'")}')">
-        <span class="cliente-option-name">${n}</span>
-        <span class="cliente-option-meta">${meta}</span>
-      </div>`;
-    }).join('');
-    dropdown.classList.add('open');
-  }
-
-  input.addEventListener('input', () => { showDropdown(input.value); currentIndex = -1; });
-  input.addEventListener('focus', () => { if (input.value) showDropdown(input.value); });
-
-  // Keyboard navigation
-  let currentIndex = -1;
-  input.addEventListener('keydown', e => {
-    const options = dropdown.querySelectorAll('.cliente-option');
-    if (!dropdown.classList.contains('open') || options.length === 0) return;
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      currentIndex = Math.min(currentIndex + 1, options.length - 1);
-      options.forEach((o, i) => o.classList.toggle('focused', i === currentIndex));
-      options[currentIndex]?.scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      currentIndex = Math.max(currentIndex - 1, 0);
-      options.forEach((o, i) => o.classList.toggle('focused', i === currentIndex));
-      options[currentIndex]?.scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'Enter' || e.key === 'Tab') {
-      if (currentIndex >= 0 && options[currentIndex]) {
-        e.preventDefault();
-        options[currentIndex].click();
-        currentIndex = -1;
-      }
-    } else if (e.key === 'Escape') {
-      dropdown.classList.remove('open');
-      currentIndex = -1;
-    }
+      const clientes = getClientes();
+      return filtrados.map(n => {
+        // Buscar cliente normalizando también
+        const c = clientes.find(x => normalizarTexto(x.nombre) === normalizarTexto(n));
+        const cant = c ? c.pedidos.length : 1;
+        const meta = `(${cant} pedido${cant !== 1 ? 's' : ''})`;
+        return `<div class="cliente-option" data-nombre="${n.replace(/"/g, '&quot;')}">
+          <span class="cliente-option-name">${n}</span>
+          <span class="cliente-option-meta">${meta}</span>
+        </div>`;
+      }).join('');
+    },
+    onSelect(opt) {
+      input.value = opt.dataset.nombre;
+    },
   });
-
-  document.addEventListener('click', e => {
-    if (!e.target.closest('.cliente-wrap')) { dropdown.classList.remove('open'); currentIndex = -1; }
-  });
-}
-
-function seleccionarCliente(nombre) {
-  const input = document.getElementById('f-cliente');
-  const dropdown = document.getElementById('cliente-dropdown');
-  if (input) input.value = nombre;
-  if (dropdown) dropdown.classList.remove('open');
 }
 
 function initProductoAutocomplete() {
@@ -2449,99 +2843,84 @@ function initProductoAutocomplete() {
   cantEl.addEventListener('input', recalcTotal);
   cantEl.addEventListener('change', recalcTotal);
 
-  function highlight(text, query) {
-    if (!query) return text;
-    const re = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
-    return text.replace(re, '<mark>$1</mark>');
-  }
-
-  function renderDropdown(query) {
-    const catalogoActual = getCatalogo();
-    const q = query.trim().toLowerCase();
-    const matches = q
-      ? catalogoActual.filter(p => p.nombre.toLowerCase().includes(q) || p.cat.toLowerCase().includes(q))
-      : catalogoActual;
-
-    const exactMatch = catalogoActual.some(p => p.nombre.toLowerCase() === q);
-
-    // Agrupar por categoría
-    const cats = {};
-    matches.forEach(p => {
-      if (!cats[p.cat]) cats[p.cat] = [];
-      cats[p.cat].push(p);
-    });
-
-    let html = '';
-    Object.entries(cats).forEach(([cat, items]) => {
-      html += `<div class="prod-cat">${cat}</div>`;
-      items.forEach(item => {
-        const precioStr = item.precio ? `$${item.precio.toLocaleString('es-AR')} c/u` : '';
-        html += `<div class="prod-option" data-nombre="${item.nombre.replace(/"/g,'&quot;')}" data-precio="${item.precio||''}" data-precioporcion="${item.precioPorcion||''}">
-          <span>${highlight(item.nombre, q)}</span>
-          ${precioStr ? `<span class="prod-precio">${precioStr}</span>` : '<span class="prod-precio" style="color:var(--text3);font-weight:400">Ingresar precio</span>'}
-        </div>`;
-      });
-    });
-
-    // Opción de agregar nuevo si no hay match exacto y hay texto
-    if (q && !exactMatch) {
-      const nombreNuevo = query.trim();
-      html += `<div class="prod-cat">✨ Nuevo producto</div>
-        <div class="prod-option" data-nombre="${nombreNuevo.replace(/"/g,'&quot;')}" data-precio="" data-nuevo="true"
-          style="color:var(--accent);font-weight:600">
-          <span>➕ Agregar "${nombreNuevo}" al catálogo</span>
-          <span class="prod-precio" style="color:var(--text3);font-weight:400">nuevo</span>
-        </div>`;
-    }
-
-    if (!html) {
-      dropdown.innerHTML = '<div style="padding:12px 14px;font-size:13px;color:var(--text3)">Sin resultados</div>';
-      dropdown.classList.add('open');
-      return;
-    }
-
-    dropdown.innerHTML = html;
-    dropdown.classList.add('open');
-
-    dropdown.querySelectorAll('.prod-option').forEach(opt => {
-      opt.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        input.value = opt.dataset.nombre;
-        togglePresentacionWrap(input.value);
-        // Si es nuevo, agregarlo al catálogo y mostrar mensaje en hint
-        if (opt.dataset.nuevo === 'true') {
-          const nuevoCatItem = agregarProductoAlCatalogoSiEsNuevo(opt.dataset.nombre, null);
-          if (nuevoCatItem) persistItem('catalogo', nuevoCatItem, catalogoDocId(nuevoCatItem.nombre));
-          saveState();
-          precioPorcionSel = null;
-          const hint = document.getElementById('f-precio-hint');
-          if (hint) hint.textContent = '✨ Producto guardado en tu catálogo';
-          setTimeout(() => { precioEl.focus(); precioEl.select(); }, 50);
-        } else {
-          setPrecioUnitario(opt.dataset.precio);
-          precioPorcionSel = opt.dataset.precioporcion ? Number(opt.dataset.precioporcion) : null;
-          // Si no tiene precio fijo, enfocar el campo precio
-          if (!opt.dataset.precio) {
-            setTimeout(() => { precioEl.focus(); precioEl.select(); }, 50);
-          }
-        }
-        dropdown.classList.remove('open');
-      });
-    });
-  }
-
-  input.addEventListener('focus', () => renderDropdown(input.value));
+  // Al escribir libremente, buscar si coincide exactamente con un producto del catálogo
   input.addEventListener('input', () => {
-    // Al escribir libremente, buscar si coincide exactamente con un producto del catálogo
     const catAct = getCatalogo();
     const match = catAct.find(p => p.nombre.toLowerCase() === input.value.trim().toLowerCase());
     setPrecioUnitario(match ? match.precio : null);
     precioPorcionSel = match ? (match.precioPorcion || null) : null;
-    renderDropdown(input.value);
     togglePresentacionWrap(input.value);
   });
-  input.addEventListener('blur', () => {
-    setTimeout(() => dropdown.classList.remove('open'), 150);
+
+  crearAutocomplete({
+    input, dropdown,
+    optionSelector: '.prod-option',
+    showOnEmptyFocus: true,
+    renderHTML(query) {
+      const catalogoActual = getCatalogo();
+      const q = query.trim().toLowerCase();
+      const matches = q
+        ? catalogoActual.filter(p => p.nombre.toLowerCase().includes(q) || p.cat.toLowerCase().includes(q))
+        : catalogoActual;
+
+      const exactMatch = catalogoActual.some(p => p.nombre.toLowerCase() === q);
+
+      // Agrupar por categoría
+      const cats = {};
+      matches.forEach(p => {
+        if (!cats[p.cat]) cats[p.cat] = [];
+        cats[p.cat].push(p);
+      });
+
+      let html = '';
+      Object.entries(cats).forEach(([cat, items]) => {
+        html += `<div class="prod-cat">${cat}</div>`;
+        items.forEach(item => {
+          const precioStr = item.precio ? `$${item.precio.toLocaleString('es-AR')} c/u` : '';
+          html += `<div class="prod-option" data-nombre="${item.nombre.replace(/"/g,'&quot;')}" data-precio="${item.precio||''}" data-precioporcion="${item.precioPorcion||''}">
+            <span>${highlightMatch(item.nombre, q)}</span>
+            ${precioStr ? `<span class="prod-precio">${precioStr}</span>` : '<span class="prod-precio" style="color:var(--text3);font-weight:400">Ingresar precio</span>'}
+          </div>`;
+        });
+      });
+
+      // Opción de agregar nuevo si no hay match exacto y hay texto
+      if (q && !exactMatch) {
+        const nombreNuevo = query.trim();
+        html += `<div class="prod-cat">✨ Nuevo producto</div>
+          <div class="prod-option" data-nombre="${nombreNuevo.replace(/"/g,'&quot;')}" data-precio="" data-nuevo="true"
+            style="color:var(--accent);font-weight:600">
+            <span>➕ Agregar "${nombreNuevo}" al catálogo</span>
+            <span class="prod-precio" style="color:var(--text3);font-weight:400">nuevo</span>
+          </div>`;
+      }
+
+      if (!html) {
+        return '<div style="padding:12px 14px;font-size:13px;color:var(--text3)">Sin resultados</div>';
+      }
+      return html;
+    },
+    onSelect(opt) {
+      input.value = opt.dataset.nombre;
+      togglePresentacionWrap(input.value);
+      // Si es nuevo, agregarlo al catálogo y mostrar mensaje en hint
+      if (opt.dataset.nuevo === 'true') {
+        const nuevoCatItem = agregarProductoAlCatalogoSiEsNuevo(opt.dataset.nombre, null);
+        if (nuevoCatItem) persistItem('catalogo', nuevoCatItem, catalogoDocId(nuevoCatItem.nombre));
+        saveState();
+        precioPorcionSel = null;
+        const hint = document.getElementById('f-precio-hint');
+        if (hint) hint.textContent = '✨ Producto guardado en tu catálogo';
+        setTimeout(() => { precioEl.focus(); precioEl.select(); }, 50);
+      } else {
+        setPrecioUnitario(opt.dataset.precio);
+        precioPorcionSel = opt.dataset.precioporcion ? Number(opt.dataset.precioporcion) : null;
+        // Si no tiene precio fijo, enfocar el campo precio
+        if (!opt.dataset.precio) {
+          setTimeout(() => { precioEl.focus(); precioEl.select(); }, 50);
+        }
+      }
+    },
   });
 }
 
@@ -2564,7 +2943,7 @@ function savePedido(id) {
     fechaEntrega: fecha,
     hora: document.getElementById('f-hora').value || '12:00',
     estado: document.getElementById('f-estado').value,
-    pagado: id ? state.pedidos.find(p=>p.id===id)?.pagado || false : false,
+    montoPagado: Math.max(0, Number(document.getElementById('f-monto-pagado').value) || 0),
     notas: document.getElementById('f-notas').value.trim(),
   };
 
@@ -2647,6 +3026,25 @@ function renderRecetas() {
 }
 
 /* -------- GASTOS FIJOS -------- */
+// Fecha estimada del próximo pago = ultimoPago + cadaXDias.
+// Si el gasto todavía no tiene ultimoPago cargado (datos viejos, previos a esta migración),
+// se asume que el último pago fue "hoy - cadaXDias", para que quede como "vence hoy/ya" y
+// no se rompa nada existente.
+function proximaFechaPagoGasto(g) {
+  const ultimoPago = g.ultimoPago || addDiasStr(todayStr(), -g.cadaXDias);
+  return addDiasStr(ultimoPago, g.cadaXDias);
+}
+// null = al día, 'yellow' = vence en 3 días o menos, 'red' = ya venció
+function estadoPagoGastoFijo(g) {
+  const dias = diffDiasDesdeHoy(proximaFechaPagoGasto(g));
+  if (dias < 0) return 'red';
+  if (dias <= 3) return 'yellow';
+  return null;
+}
+function gastosFijosPorVencerOVencidos() {
+  return (state.gastosFijos || []).filter(g => estadoPagoGastoFijo(g) !== null);
+}
+
 function renderGastosFijosScreen() {
   const el = document.getElementById('screen-gastosfijos');
   el.innerHTML = `
@@ -2675,14 +3073,26 @@ function renderGastosFijosList() {
   }
   return `<div class="list-2col">${state.gastosFijos.map(g => {
     const mensual = Math.round((g.monto / g.cadaXDias) * 30);
+    const proxFecha = proximaFechaPagoGasto(g);
+    const estado = estadoPagoGastoFijo(g);
+    const dias = diffDiasDesdeHoy(proxFecha);
+    const colorVar = estado === 'red' ? 'var(--red)' : estado === 'yellow' ? 'var(--yellow)' : 'var(--text2)';
+    const colorBg = estado === 'red' ? 'var(--red-light)' : estado === 'yellow' ? 'var(--yellow-light)' : 'transparent';
+    const vencLabel = dias < 0
+      ? `Venció hace ${Math.abs(dias)} día${Math.abs(dias) !== 1 ? 's' : ''}`
+      : dias === 0
+        ? 'Vence hoy'
+        : `Vence en ${dias} día${dias !== 1 ? 's' : ''}`;
     return `
-      <div class="ingredient-item anim-in">
+      <div class="ingredient-item anim-in" ${estado ? `style="border:1.5px solid ${colorVar};background:${colorBg}"` : ''}>
         <div class="ingredient-header">
           <div class="ingredient-name">${g.nombre}</div>
           <span style="font-size:13px;font-weight:700;color:var(--accent)">${fmt(mensual)}/mes</span>
         </div>
         <div class="ingredient-amounts">${fmt(g.monto)} cada ${g.cadaXDias} días</div>
+        <div style="font-size:12px;font-weight:600;color:${colorVar};margin-top:4px">📅 Próximo pago: ${fmtDate(proxFecha)} · ${vencLabel}</div>
         <div class="ingredient-actions">
+          <button class="btn btn-ghost btn-sm" onclick="marcarGastoFijoPagado(${g.id})">✅ Pagado hoy</button>
           <button class="btn btn-ghost btn-sm" onclick="openGastoFijoForm(${g.id})">✏️ Editar</button>
           <button class="btn btn-danger btn-sm" onclick="confirmEliminarGastoFijo(${g.id})">🗑</button>
         </div>
@@ -2749,6 +3159,16 @@ function saveGastoFijo(id) {
   persistItem('gastosFijos', gastoGuardado);
   saveState(); closeModal();
   renderScreen(activeScreen);
+}
+
+function marcarGastoFijoPagado(id) {
+  const g = state.gastosFijos.find(x => x.id === id);
+  if (!g) return;
+  g.ultimoPago = todayStr();
+  persistItem('gastosFijos', g);
+  saveState();
+  showToast(`✅ ${g.nombre} marcado como pagado hoy`);
+  renderGastosFijosScreen();
 }
 
 function confirmEliminarGastoFijo(id) {
@@ -3191,82 +3611,70 @@ function initRecetaProductoAutocomplete() {
   const aviso    = document.getElementById('rec-prod-nuevo-aviso');
   if (!input || !dropdown) return;
 
-  function normalizar(s) {
-    return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-  }
-  function highlight(text, q) {
-    if (!q) return text;
-    const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
-    return text.replace(re, '<mark>$1</mark>');
+  // Muestra/oculta el aviso de "producto nuevo" según si hay texto y no matchea el catálogo
+  function actualizarAviso(val, esNuevo) {
+    if (aviso) aviso.style.display = (val.trim() && esNuevo) ? 'block' : 'none';
   }
 
-  function renderDrop(val) {
-    const cat = getCatalogo();
-    const q = normalizar(val.trim());
-    if (!val.trim()) { dropdown.classList.remove('open'); if (aviso) aviso.style.display = 'none'; return; }
-
-    const matches = q ? cat.filter(p => normalizar(p.nombre).includes(q)) : cat;
-    const exactMatch = cat.some(p => normalizar(p.nombre) === q);
-
-    let html = '';
-    if (matches.length > 0) {
-      // Agrupar por categoría
-      const grupos = {};
-      matches.forEach(p => {
-        if (!grupos[p.cat]) grupos[p.cat] = [];
-        grupos[p.cat].push(p);
-      });
-      Object.entries(grupos).forEach(([cat, items]) => {
-        html += `<div class="prod-cat">${cat}</div>`;
-        items.forEach(item => {
-          const precioStr = item.precio ? `$${item.precio.toLocaleString('es-AR')}` : 'Sin precio';
-          html += `<div class="prod-option" data-nombre="${item.nombre.replace(/"/g,'&quot;')}" data-custom="${item.custom||''}">
-            <span>${highlight(item.nombre, q)}</span>
-            <span class="prod-precio">${precioStr}</span>
-          </div>`;
-        });
-      });
-    }
-
-    // Opción de agregar nuevo si no hay match exacto
-    if (!exactMatch && val.trim()) {
-      html += `<div class="prod-cat">✨ Nuevo producto</div>
-        <div class="prod-option" data-nombre="${val.trim().replace(/"/g,'&quot;')}" data-nuevo="true"
-          style="color:var(--accent);font-weight:600">
-          <span>➕ Agregar "${val.trim()}" al catálogo</span>
-          <span class="prod-precio" style="color:var(--text3)">nuevo</span>
-        </div>`;
-    }
-
-    if (!html) { dropdown.classList.remove('open'); return; }
-    dropdown.innerHTML = html;
-    dropdown.classList.add('open');
-
-    // Mostrar/ocultar aviso de producto nuevo
-    if (aviso) aviso.style.display = !exactMatch && val.trim() ? 'block' : 'none';
-
-    dropdown.querySelectorAll('.prod-option').forEach(opt => {
-      opt.addEventListener('mousedown', e => {
-        e.preventDefault();
-        input.value = opt.dataset.nombre;
-        dropdown.classList.remove('open');
-        // Si es nuevo, mostrar aviso; si ya existe, ocultarlo
-        const esNuevo = opt.dataset.nuevo === 'true';
-        if (aviso) aviso.style.display = esNuevo ? 'block' : 'none';
-        setTimeout(() => document.getElementById('f-rec-rinde')?.focus(), 50);
-      });
-    });
-  }
-
-  input.addEventListener('input', () => renderDrop(input.value));
-  input.addEventListener('focus', () => renderDrop(input.value));
-  input.addEventListener('blur', () => setTimeout(() => {
-    dropdown.classList.remove('open');
-    // Verificar si es nuevo al perder foco
+  // Recalcula el aviso contra el catálogo actual (usado en blur / click afuera)
+  function actualizarAvisoDesdeInput() {
     const val = input.value.trim();
     const esNuevo = val && !getCatalogo().some(p => p.nombre.toLowerCase() === val.toLowerCase());
-    if (aviso) aviso.style.display = (val && esNuevo) ? 'block' : 'none';
-  }, 160));
+    actualizarAviso(input.value, esNuevo);
+  }
+
+  crearAutocomplete({
+    input, dropdown,
+    optionSelector: '.prod-option',
+    showOnEmptyFocus: true,
+    blurDelay: 160,
+    onClose: actualizarAvisoDesdeInput,
+    renderHTML(val) {
+      const cat = getCatalogo();
+      const q = normalizarTexto(val.trim());
+      if (!val.trim()) { actualizarAviso(val, false); return ''; }
+
+      const matches = q ? cat.filter(p => normalizarTexto(p.nombre).includes(q)) : cat;
+      const exactMatch = cat.some(p => normalizarTexto(p.nombre) === q);
+      actualizarAviso(val, !exactMatch);
+
+      let html = '';
+      if (matches.length > 0) {
+        // Agrupar por categoría
+        const grupos = {};
+        matches.forEach(p => {
+          if (!grupos[p.cat]) grupos[p.cat] = [];
+          grupos[p.cat].push(p);
+        });
+        Object.entries(grupos).forEach(([cat, items]) => {
+          html += `<div class="prod-cat">${cat}</div>`;
+          items.forEach(item => {
+            const precioStr = item.precio ? `$${item.precio.toLocaleString('es-AR')}` : 'Sin precio';
+            html += `<div class="prod-option" data-nombre="${item.nombre.replace(/"/g,'&quot;')}" data-custom="${item.custom||''}">
+              <span>${highlightMatch(item.nombre, q)}</span>
+              <span class="prod-precio">${precioStr}</span>
+            </div>`;
+          });
+        });
+      }
+
+      // Opción de agregar nuevo si no hay match exacto
+      if (!exactMatch && val.trim()) {
+        html += `<div class="prod-cat">✨ Nuevo producto</div>
+          <div class="prod-option" data-nombre="${val.trim().replace(/"/g,'&quot;')}" data-nuevo="true"
+            style="color:var(--accent);font-weight:600">
+            <span>➕ Agregar "${val.trim()}" al catálogo</span>
+            <span class="prod-precio" style="color:var(--text3)">nuevo</span>
+          </div>`;
+      }
+
+      return html;
+    },
+    onSelect(opt) {
+      input.value = opt.dataset.nombre;
+      setTimeout(() => document.getElementById('f-rec-rinde')?.focus(), 50);
+    },
+  });
 }
 
 /**
@@ -3569,90 +3977,47 @@ function initIngNombreAutocomplete(editingId) {
   const dropdown = document.getElementById('ing-nombre-dropdown');
   if (!input || !dropdown) return;
 
-  // Usar position:fixed para que el dropdown no quede cortado por el overflow del modal
-  dropdown.style.position = 'fixed';
-  dropdown.style.zIndex   = '9999';
-  dropdown.style.display  = 'none';
-  dropdown.style.maxHeight = '200px';
-  dropdown.style.overflowY = 'auto';
+  crearAutocomplete({
+    input, dropdown,
+    optionSelector: '.cliente-option',
+    positionFixed: true,
+    blurDelay: 180,
+    renderHTML(val) {
+      const q = normalizarTexto(val.trim());
+      if (!q) return '';
 
-  function positionDropdown() {
-    const rect = input.getBoundingClientRect();
-    dropdown.style.left  = rect.left + 'px';
-    dropdown.style.top   = (rect.bottom + 4) + 'px';
-    dropdown.style.width = rect.width + 'px';
-  }
+      // Sugerir ingredientes existentes que coincidan (excluyendo el que se edita)
+      const matches = state.ingredientes.filter(ing =>
+        ing.id !== editingId && normalizarTexto(ing.nombre).includes(q)
+      );
+      if (matches.length === 0) return '';
 
-  function normalizar(s) {
-    return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  }
-  function highlight(text, q) {
-    if (!q) return text;
-    const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
-    return text.replace(re, '<mark>$1</mark>');
-  }
-
-  function showDropdown(val) {
-    const q = normalizar(val.trim());
-    if (!q) { hideDropdown(); return; }
-
-    // Sugerir ingredientes existentes que coincidan (excluyendo el que se edita)
-    const matches = state.ingredientes.filter(ing =>
-      ing.id !== editingId && normalizar(ing.nombre).includes(q)
-    );
-
-    if (matches.length === 0) { hideDropdown(); return; }
-
-    dropdown.innerHTML = matches.map(ing => {
-      const pct = stockPct(ing);
-      const pctColor = pct >= 60 ? 'var(--green)' : pct >= 30 ? 'var(--yellow)' : 'var(--red)';
-      return `<div class="cliente-option"
-        data-nombre="${ing.nombre.replace(/"/g,'&quot;')}" data-stock="${ing.stock}"
-        data-ideal="${ing.ideal}" data-unidad="${ing.unidad}">
-        <span class="cliente-option-name">${highlight(ing.nombre, q)}</span>
-        <span class="cliente-option-meta" style="color:${pctColor}">
-          Stock: ${ing.stock} ${ing.unidad}
-        </span>
-      </div>`;
-    }).join('');
-
-    positionDropdown();
-    dropdown.style.display = 'block';
-    dropdown.classList.add('open');
-
-    dropdown.querySelectorAll('.cliente-option').forEach(opt => {
-      opt.addEventListener('mousedown', e => {
-        e.preventDefault();
-        // Pone el nombre exacto en el campo
-        input.value = opt.dataset.nombre;
-        hideDropdown();
-        // Enfocar el campo stock para que siga completando
-        setTimeout(() => document.getElementById('f-stock')?.focus(), 50);
-      });
-    });
-  }
-
-  function hideDropdown() {
-    dropdown.classList.remove('open');
-    dropdown.style.display = 'none';
-  }
-
-  input.addEventListener('input', () => showDropdown(input.value));
-  input.addEventListener('focus', () => { if (input.value) showDropdown(input.value); });
-  input.addEventListener('blur', () => setTimeout(() => hideDropdown(), 180));
-
-  // Reposicionar si el modal se scrollea
-  const modalSheet = document.querySelector('.modal-sheet');
-  if (modalSheet) {
-    modalSheet.addEventListener('scroll', () => {
-      if (dropdown.style.display === 'block') positionDropdown();
-    });
-  }
+      return matches.map(ing => {
+        const pct = stockPct(ing);
+        const pctColor = pct >= 60 ? 'var(--green)' : pct >= 30 ? 'var(--yellow)' : 'var(--red)';
+        return `<div class="cliente-option"
+          data-nombre="${ing.nombre.replace(/"/g,'&quot;')}" data-stock="${ing.stock}"
+          data-ideal="${ing.ideal}" data-unidad="${ing.unidad}">
+          <span class="cliente-option-name">${highlightMatch(ing.nombre, q)}</span>
+          <span class="cliente-option-meta" style="color:${pctColor}">
+            Stock: ${ing.stock} ${ing.unidad}
+          </span>
+        </div>`;
+      }).join('');
+    },
+    onSelect(opt) {
+      // Pone el nombre exacto en el campo
+      input.value = opt.dataset.nombre;
+      // Enfocar el campo stock para que siga completando
+      setTimeout(() => document.getElementById('f-stock')?.focus(), 50);
+    },
+  });
 }
 
 /* -------- FINANZAS -------- */
-let finanzasVistaDia = false;
+let finanzasVista = 'lista'; // 'lista' | 'dia' | 'calendario'
 let finanzasDiaExpandido = null;
+let finanzasAgendaInicio = todayStr(); // fecha ISO del primer día visible en el calendario de finanzas
 
 function renderFinanzas() {
   const el = document.getElementById('screen-finanzas');
@@ -3721,31 +4086,107 @@ function renderFinanzas() {
       </div>
     </div>
 
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px;flex-wrap:wrap">
       <div class="section-title" style="font-size:16px;margin-bottom:0">Movimientos</div>
       <div style="display:flex;gap:6px">
-        <div onclick="setFinanzasVista(false)"
+        <div onclick="setFinanzasVista('lista')"
           style="padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;
-            border:2px solid ${!finanzasVistaDia?'var(--accent)':'var(--border)'};
-            background:${!finanzasVistaDia?'var(--accent-light)':'var(--surface)'};
-            color:${!finanzasVistaDia?'var(--accent)':'var(--text2)'}">Lista</div>
-        <div onclick="setFinanzasVista(true)"
+            border:2px solid ${finanzasVista==='lista'?'var(--accent)':'var(--border)'};
+            background:${finanzasVista==='lista'?'var(--accent-light)':'var(--surface)'};
+            color:${finanzasVista==='lista'?'var(--accent)':'var(--text2)'}">Lista</div>
+        <div onclick="setFinanzasVista('dia')"
           style="padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;
-            border:2px solid ${finanzasVistaDia?'var(--accent)':'var(--border)'};
-            background:${finanzasVistaDia?'var(--accent-light)':'var(--surface)'};
-            color:${finanzasVistaDia?'var(--accent)':'var(--text2)'}">Por día</div>
+            border:2px solid ${finanzasVista==='dia'?'var(--accent)':'var(--border)'};
+            background:${finanzasVista==='dia'?'var(--accent-light)':'var(--surface)'};
+            color:${finanzasVista==='dia'?'var(--accent)':'var(--text2)'}">Por día</div>
+        <div onclick="setFinanzasVista('calendario')"
+          style="padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;
+            border:2px solid ${finanzasVista==='calendario'?'var(--accent)':'var(--border)'};
+            background:${finanzasVista==='calendario'?'var(--accent-light)':'var(--surface)'};
+            color:${finanzasVista==='calendario'?'var(--accent)':'var(--text2)'}">Calendario</div>
       </div>
     </div>
 
-    ${movs.length === 0
-      ? `<div class="empty-state"><div class="empty-icon">💸</div><p>Sin movimientos aún</p></div>`
-      : finanzasVistaDia
-        ? renderMovsPorDia()
-        : movs.map(m => finanzaItem(m)).join('')
+    ${finanzasVista === 'calendario'
+      ? renderFinanzasCalendario(movs)
+      : movs.length === 0
+        ? `<div class="empty-state"><div class="empty-icon">💸</div><p>Sin movimientos aún</p></div>`
+        : finanzasVista === 'dia'
+          ? renderMovsPorDia()
+          : movs.map(m => finanzaItem(m)).join('')
     }
   `;
 }
-function setFinanzasVista(porDia) { finanzasVistaDia = porDia; finanzasDiaExpandido = null; renderFinanzas(); }
+function setFinanzasVista(vista) { finanzasVista = vista; finanzasDiaExpandido = null; renderFinanzas(); }
+
+/* -------- CALENDARIO SEMANAL (Finanzas) -------- */
+function cambiarSemanaFinanzas(dias) {
+  finanzasAgendaInicio = addDiasStr(finanzasAgendaInicio, dias);
+  renderFinanzas();
+}
+function irHoyFinanzas() {
+  finanzasAgendaInicio = todayStr();
+  renderFinanzas();
+}
+function renderFinanzasCalendario(movs) {
+  const dias = semanaDias(finanzasAgendaInicio);
+  const hoy = todayStr();
+
+  const cols = dias.map(fecha => {
+    const movsDia = movs
+      .filter(m => m.fecha === fecha)
+      .sort((a, b) => (a.descripcion || '').localeCompare(b.descripcion || ''));
+    const esHoy = fecha === hoy;
+    const ingDia = movsDia.filter(m=>m.tipo==='income').reduce((s,m)=>s+m.monto,0);
+    const egDia  = movsDia.filter(m=>m.tipo==='expense').reduce((s,m)=>s+m.monto,0);
+    return `
+      <div>
+        <div style="text-align:center;padding:8px 4px;border-radius:var(--radius-sm) var(--radius-sm) 0 0;
+          background:${esHoy ? 'var(--accent-light)' : 'var(--surface2)'};
+          border:1px solid var(--border);border-bottom:none">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:${esHoy ? 'var(--accent)' : 'var(--text3)'}">${diaSemanaLabel(fecha)}</div>
+          <div style="font-size:15px;font-weight:800;color:${esHoy ? 'var(--accent)' : 'var(--text)'}">${fecha.slice(8,10)}</div>
+          ${movsDia.length > 0 ? `<div style="font-size:9px;margin-top:2px">
+            ${ingDia > 0 ? `<span style="color:var(--green)">+${fmt(ingDia)}</span>` : ''}
+            ${egDia > 0 ? ` <span style="color:var(--red)">-${fmt(egDia)}</span>` : ''}
+          </div>` : ''}
+        </div>
+        <div style="border:1px solid var(--border);border-radius:0 0 var(--radius-sm) var(--radius-sm);
+          min-height:120px;padding:6px;display:flex;flex-direction:column;gap:6px;background:var(--surface)">
+          ${movsDia.length === 0
+            ? `<div style="text-align:center;color:var(--text3);font-size:11px;padding:16px 4px">Sin movimientos</div>`
+            : movsDia.map(m => finanzaCardMini(m)).join('')}
+        </div>
+      </div>`;
+  }).join('');
+
+  const rango = `${fmtDate(dias[0])} – ${fmtDate(dias[6])}`;
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="cambiarSemanaFinanzas(-7)">‹ Anterior</button>
+      <div style="text-align:center">
+        <div style="font-size:12px;font-weight:700;color:var(--text2)">${rango}</div>
+        <div onclick="irHoyFinanzas()" style="font-size:11px;color:var(--accent);cursor:pointer;font-weight:700">Ir a hoy</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="cambiarSemanaFinanzas(7)">Siguiente ›</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(130px, 1fr));gap:8px">
+      ${cols}
+    </div>
+  `;
+}
+
+function finanzaCardMini(m) {
+  return `
+    <div class="anim-in" onclick="event.stopPropagation();openEditMovimiento(${m.id})"
+      style="cursor:pointer;background:var(--surface);border:1px solid var(--border);
+        border-left:3px solid ${m.tipo==='income'?'var(--green)':'var(--red)'};border-radius:6px;padding:6px 8px">
+      <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${m.descripcion}${m.auto?' 🔄':''}</div>
+      <div style="font-size:11px;font-weight:700;color:${m.tipo==='income'?'var(--green)':'var(--red)'}">${m.tipo==='income'?'+':'-'}${fmt(m.monto)}</div>
+    </div>
+  `;
+}
 function toggleDiaFinanza(fecha) {
   finanzasDiaExpandido = finanzasDiaExpandido === fecha ? null : fecha;
   renderFinanzas();
@@ -3896,66 +4337,41 @@ function initMovDescAutocomplete() {
   const dropdown = document.getElementById('mov-desc-dropdown');
   if (!input || !dropdown) return;
 
-  function normalizar(s) {
-    return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-  }
-
-  function highlight(text, q) {
-    if (!q) return text;
-    const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
-    return text.replace(re, '<mark>$1</mark>');
-  }
-
-  function showDropdown(val) {
-    const q = normalizar(val.trim());
-    if (!q) { dropdown.classList.remove('open'); _movIngredienteId = null; hideMovCantidad(); return; }
-
-    // Buscar ingredientes que coincidan
-    const matches = state.ingredientes.filter(ing =>
-      normalizar(ing.nombre).includes(q)
-    );
-
-    if (matches.length === 0) {
-      dropdown.classList.remove('open');
-      // Si no hay coincidencia, ocultar caja de cantidad
+  crearAutocomplete({
+    input, dropdown,
+    optionSelector: '.cliente-option',
+    renderHTML(val) {
+      // Cualquier tipeo invalida la selección previa hasta que se elija una opción de nuevo
       _movIngredienteId = null;
       hideMovCantidad();
-      return;
-    }
 
-    dropdown.innerHTML = matches.map(ing => {
-      const pct = stockPct(ing);
-      const pctColor = pct >= 60 ? 'var(--green)' : pct >= 30 ? 'var(--yellow)' : 'var(--red)';
-      return `<div class="cliente-option" data-id="${ing.id}" data-nombre="${ing.nombre}" data-unidad="${ing.unidad}">
-        <span class="cliente-option-name">${highlight(ing.nombre, q)}</span>
-        <span class="cliente-option-meta" style="color:${pctColor}">Stock: ${ing.stock} ${ing.unidad}</span>
-      </div>`;
-    }).join('');
-    dropdown.classList.add('open');
+      const q = normalizarTexto(val.trim());
+      if (!q) return '';
 
-    dropdown.querySelectorAll('.cliente-option').forEach(opt => {
-      opt.addEventListener('mousedown', e => {
-        e.preventDefault();
-        const tipo = document.getElementById('f-tipo').value;
-        input.value = opt.dataset.nombre;
-        _movIngredienteId = parseInt(opt.dataset.id);
-        dropdown.classList.remove('open');
-        // Solo mostrar caja de cantidad si es un egreso
-        if (tipo === 'expense') showMovCantidad(opt.dataset.unidad);
-        else hideMovCantidad();
-        // Enfocar el campo monto
-        setTimeout(() => document.getElementById('f-monto')?.focus(), 50);
-      });
-    });
-  }
+      // Buscar ingredientes que coincidan
+      const matches = state.ingredientes.filter(ing => normalizarTexto(ing.nombre).includes(q));
+      if (matches.length === 0) return '';
 
-  input.addEventListener('input', () => {
-    _movIngredienteId = null;
-    hideMovCantidad();
-    showDropdown(input.value);
+      return matches.map(ing => {
+        const pct = stockPct(ing);
+        const pctColor = pct >= 60 ? 'var(--green)' : pct >= 30 ? 'var(--yellow)' : 'var(--red)';
+        return `<div class="cliente-option" data-id="${ing.id}" data-nombre="${ing.nombre}" data-unidad="${ing.unidad}">
+          <span class="cliente-option-name">${highlightMatch(ing.nombre, q)}</span>
+          <span class="cliente-option-meta" style="color:${pctColor}">Stock: ${ing.stock} ${ing.unidad}</span>
+        </div>`;
+      }).join('');
+    },
+    onSelect(opt) {
+      const tipo = document.getElementById('f-tipo').value;
+      input.value = opt.dataset.nombre;
+      _movIngredienteId = parseInt(opt.dataset.id);
+      // Solo mostrar caja de cantidad si es un egreso
+      if (tipo === 'expense') showMovCantidad(opt.dataset.unidad);
+      else hideMovCantidad();
+      // Enfocar el campo monto
+      setTimeout(() => document.getElementById('f-monto')?.focus(), 50);
+    },
   });
-  input.addEventListener('focus', () => { if (input.value) showDropdown(input.value); });
-  input.addEventListener('blur', () => setTimeout(() => dropdown.classList.remove('open'), 150));
 }
 
 function showMovCantidad(unidad) {
@@ -4114,7 +4530,7 @@ function getClientes() {
     }
     mapa[nombre].pedidos.push(p);
     mapa[nombre].totalGastado += p.precio || 0;
-    if (!p.pagado) mapa[nombre].totalAdeudado += p.precio || 0;
+    mapa[nombre].totalAdeudado += saldoPendiente(p);
     if (!mapa[nombre].ultimoPedido || p.fechaEntrega > mapa[nombre].ultimoPedido) {
       mapa[nombre].ultimoPedido = p.fechaEntrega;
     }
@@ -4224,7 +4640,7 @@ function openClienteDetalle(nombre) {
         <div class="finance-dot income">📦</div>
         <div class="finance-info">
           <div class="finance-desc">${p.producto}</div>
-          <div class="finance-date">${fmtDate(p.fechaEntrega)} · <span class="badge ${estadoBadge(p.estado)}">${estadoLabel(p.estado)}</span> ${!p.pagado ? '<span class="badge badge-unpaid">Sin pago</span>' : ''}</div>
+          <div class="finance-date">${fmtDate(p.fechaEntrega)} · <span class="badge ${estadoBadge(p.estado)}">${estadoLabel(p.estado)}</span> ${!estaPagadoCompleto(p) ? `<span class="badge ${estadoPagoInfo(p).badge}">${estadoPagoInfo(p).label}</span>` : ''}</div>
         </div>
         <div class="finance-amount income">${fmt(p.precio)}</div>
       </div>
@@ -4236,14 +4652,14 @@ function openClienteDetalle(nombre) {
 }
 
 function marcarTodosPagados(nombre) {
-  const pendientes = state.pedidos.filter(p => p.cliente.trim() === nombre && !p.pagado);
+  const pendientes = state.pedidos.filter(p => p.cliente.trim() === nombre && !estaPagadoCompleto(p));
   if (pendientes.length === 0) return;
-  const total = pendientes.reduce((s, p) => s + (p.precio || 0), 0);
+  const total = pendientes.reduce((s, p) => s + saldoPendiente(p), 0);
   showConfirm(
     '¿Marcar todo como pagado?',
     `Se marcarán ${pendientes.length} pedido${pendientes.length !== 1 ? 's' : ''} de ${nombre} como pagados (${fmt(total)}).`,
     () => {
-      pendientes.forEach(p => { p.pagado = true; persistItem('pedidos', p); });
+      pendientes.forEach(p => { p.montoPagado = p.precio || 0; delete p.pagado; persistItem('pedidos', p); });
       saveState();
       closeModal();
       showToast('💰 Pagos registrados');
@@ -4460,6 +4876,48 @@ function programarAlertas1Hora() {
 }
 window.programarAlertas1Hora = programarAlertas1Hora;
 window.programarNotificacionDiaria = programarNotificacionDiaria;
+
+function renderAtrasadosBanner() {
+  const atrasados = pedidosAtrasados();
+  if (atrasados.length === 0) return '';
+  return `<div class="card" style="background:var(--red-light);border-color:var(--red);margin-bottom:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:20px">⚠️</span>
+        <div>
+          <div style="font-weight:600;font-size:13px;color:var(--red)">${atrasados.length} pedido${atrasados.length !== 1 ? 's' : ''} atrasado${atrasados.length !== 1 ? 's' : ''}</div>
+          <div style="font-size:11px;color:var(--text2)">Con fecha de entrega vencida y sin completar</div>
+        </div>
+      </div>
+      <button class="btn btn-primary btn-sm" style="background:var(--red)" onclick="navigate('pedidos')">Ver pedidos</button>
+    </div>
+  </div>`;
+}
+
+function renderGastosFijosBanner() {
+  const pendientes = gastosFijosPorVencerOVencidos();
+  if (pendientes.length === 0) return '';
+  const vencidos = pendientes.filter(g => estadoPagoGastoFijo(g) === 'red');
+  const esVencido = vencidos.length > 0;
+  const color = esVencido ? 'var(--red)' : 'var(--yellow)';
+  const bg = esVencido ? 'var(--red-light)' : 'var(--yellow-light)';
+  const cant = esVencido ? vencidos.length : pendientes.length;
+  const texto = esVencido
+    ? `${cant} gasto${cant !== 1 ? 's' : ''} fijo${cant !== 1 ? 's' : ''} vencido${cant !== 1 ? 's' : ''}`
+    : `${cant} gasto${cant !== 1 ? 's' : ''} fijo${cant !== 1 ? 's' : ''} por vencer`;
+  return `<div class="card" style="background:${bg};border-color:${color};margin-bottom:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:20px">💸</span>
+        <div>
+          <div style="font-weight:600;font-size:13px;color:${color}">${texto}</div>
+          <div style="font-size:11px;color:var(--text2)">Gas, papelería u otros gastos recurrentes</div>
+        </div>
+      </div>
+      <button class="btn btn-primary btn-sm" style="background:${color}" onclick="navigate('gastosfijos')">Ver gastos</button>
+    </div>
+  </div>`;
+}
 
 function renderNotifBanner() {
   if (!('Notification' in window)) return '';

@@ -13,6 +13,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <style>
   /* ============================
      CSS VARIABLES & RESET
@@ -840,17 +841,9 @@
       <span class="nav-icon">📦</span>
       <span class="nav-label">Pedidos</span>
     </button>
-    <button class="nav-item" data-screen="ingredientes">
-      <span class="nav-icon">🧂</span>
-      <span class="nav-label">Ingredientes</span>
-    </button>
-    <button class="nav-item" data-screen="recetas">
-      <span class="nav-icon">📋</span>
-      <span class="nav-label">Recetas</span>
-    </button>
-    <button class="nav-item" data-screen="gastosfijos">
-      <span class="nav-icon">💸</span>
-      <span class="nav-label">Gastos fijos</span>
+    <button class="nav-item" data-screen="costos">
+      <span class="nav-icon">🧾</span>
+      <span class="nav-label">Costos</span>
     </button>
     <button class="nav-item" data-screen="finanzas">
       <span class="nav-icon">💰</span>
@@ -895,9 +888,12 @@
     <div id="screen-container">
       <div class="screen active" id="screen-inicio"></div>
       <div class="screen" id="screen-pedidos"></div>
-      <div class="screen" id="screen-ingredientes"></div>
-      <div class="screen" id="screen-recetas"></div>
-      <div class="screen" id="screen-gastosfijos"></div>
+      <div class="screen" id="screen-costos">
+        <div id="costos-subtabs" style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap"></div>
+        <div id="screen-ingredientes"></div>
+        <div id="screen-recetas"></div>
+        <div id="screen-gastosfijos"></div>
+      </div>
       <div class="screen" id="screen-finanzas"></div>
       <div class="screen" id="screen-notas"></div>
     <div class="screen" id="screen-clientes"></div>
@@ -913,6 +909,9 @@
     </div>
     <div class="fab-menu-item" data-action="movimiento">
       <span>Registrar gasto</span><span>💰</span>
+    </div>
+    <div class="fab-menu-item" data-action="nota">
+      <span>Nueva nota</span><span>📝</span>
     </div>
   </div>
 
@@ -943,13 +942,10 @@
 
   <!-- TOAST -->
   <div class="toast" id="toast"></div>
-  <!-- TOAST -->
-  <div class="toast" id="toast"></div>
 
   <!-- INPUT OCULTO PARA IMPORTAR BACKUP -->
   <input type="file" id="import-file-input" accept="application/json,.json" style="display:none" onchange="handleImportFile(event)">
 
-  </div><!-- /.main-area -->
   </div><!-- /.main-area -->
 </div>
 
@@ -969,6 +965,30 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 db.enablePersistence({ synchronizeTabs: true }).catch(err => {
   console.warn('No se pudo habilitar persistencia offline:', err.code);
+});
+
+// ---- Auth anónima ----
+// La app no tiene login visible (uso personal, entre Sofía y el admin),
+// pero Firestore necesita saber que quien lee/escribe es "alguien
+// autenticado" para poder cerrar el acceso público con reglas de
+// seguridad (request.auth != null). signInAnonymously() crea una sesión
+// silenciosa, sin pedir usuario/contraseña ni mostrar ninguna pantalla:
+// para Sofía y el admin la app se ve exactamente igual que antes.
+// authReadyPromise se espera antes de tocar Firestore por primera vez.
+const authReadyPromise = new Promise((resolve) => {
+  firebase.auth().onAuthStateChanged(user => {
+    if (user) {
+      resolve(user);
+    } else {
+      firebase.auth().signInAnonymously().catch(err => {
+        console.error('[Auth] Error en signInAnonymously:', err);
+        // Igual resolvemos para no trabar la app entera si falla;
+        // las lecturas/escrituras a Firestore van a fallar por permisos
+        // hasta que la auth ande, pero localStorage sigue funcionando.
+        resolve(null);
+      });
+    }
+  });
 });
 
 // ---- Firebase Cloud Messaging (push real, funciona con la app cerrada) ----
@@ -1346,7 +1366,14 @@ function diffDiasDesdeHoy(fechaStr) {
   const hoyLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   return Math.round((fecha - hoyLocal) / 86400000);
 }
+// Días transcurridos desde el último backup exportado/importado (null = nunca se hizo)
+function diasSinBackup() {
+  const ultimo = localStorage.getItem('toque_ultimo_backup');
+  if (!ultimo) return null;
+  return -diffDiasDesdeHoy(ultimo);
+}
 function stockPct(ing) {
+  if (!ing.ideal || ing.ideal <= 0) return 0;
   return Math.min(100, Math.round((ing.stock / ing.ideal) * 100));
 }
 function stockColor(pct) {
@@ -1483,6 +1510,8 @@ function exportarDatos() {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 
+  localStorage.setItem('toque_ultimo_backup', todayStr());
+
   showToast('📦 Backup descargado');
 }
 
@@ -1530,6 +1559,7 @@ function handleImportFile(event) {
         showToast('⏳ Restaurando en la nube...');
         await restaurarBackupEnFirestore();
         saveState();
+        localStorage.setItem('toque_ultimo_backup', todayStr());
         renderScreen(activeScreen);
         showToast('✅ Datos restaurados correctamente');
       }
@@ -1586,12 +1616,12 @@ document.getElementById('modal').addEventListener('click', function(e) {
 /* ============================================================
    NAVEGACIÓN
 ============================================================ */
-const screens = ['inicio','pedidos','ingredientes','recetas','gastosfijos','finanzas','notas','clientes'];
+const screens = ['inicio','pedidos','costos','finanzas','notas','clientes'];
 let activeScreen = 'inicio';
 
 const screenTitles = {
   inicio: 'Inicio', pedidos: 'Pedidos',
-  ingredientes: 'Ingredientes', recetas: 'Recetas / Productos', gastosfijos: 'Gastos fijos',
+  costos: 'Costos',
   finanzas: 'Finanzas', notas: 'Anotaciones', clientes: 'Clientes'
 };
 function navigate(screen) {
@@ -1636,6 +1666,7 @@ document.querySelectorAll('.fab-menu-item').forEach(item => {
     const action = item.dataset.action;
     if (action === 'pedido')     openPedidoForm(null);
     if (action === 'movimiento') openMovimientoForm();
+    if (action === 'nota')       openNotaForm(null);
   });
 });
 
@@ -1646,14 +1677,58 @@ function renderScreen(screen) {
   const renders = {
     inicio: renderInicio,
     pedidos: renderPedidos,
-    ingredientes: renderIngredientes,
-    recetas: renderRecetas,
-    gastosfijos: renderGastosFijosScreen,
+    costos: renderCostos,
     finanzas: renderFinanzas,
     notas: renderNotas,
     clientes: renderClientes,
   };
   if (renders[screen]) renders[screen]();
+}
+
+/* -------- COSTOS (contenedor: Ingredientes + Recetas + Gastos fijos) -------- */
+let costosSubtab = 'ingredientes'; // 'ingredientes' | 'recetas' | 'gastosfijos'
+
+function setCostosSubtab(tab) {
+  costosSubtab = tab;
+  renderCostos();
+}
+
+function navigateCostos(tab) {
+  costosSubtab = tab;
+  navigate('costos');
+}
+
+function costosSubtabsHtml() {
+  const tabs = [
+    { key: 'ingredientes', label: '🧂 Ingredientes' },
+    { key: 'recetas',      label: '📋 Recetas' },
+    { key: 'gastosfijos',  label: '💸 Gastos fijos' },
+  ];
+  return tabs.map(t => {
+    const active = costosSubtab === t.key;
+    return `<div onclick="setCostosSubtab('${t.key}')"
+      style="display:inline-flex;align-items:center;padding:8px 16px;border-radius:20px;
+        font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:all .2s;flex-shrink:0;
+        border:2px solid ${active ? 'var(--accent)' : 'var(--border)'};
+        background:${active ? 'var(--accent-light)' : 'var(--surface)'};
+        color:${active ? 'var(--accent)' : 'var(--text2)'};">${t.label}</div>`;
+  }).join('');
+}
+
+function renderCostos() {
+  const tabsEl = document.getElementById('costos-subtabs');
+  if (tabsEl) tabsEl.innerHTML = costosSubtabsHtml();
+
+  const secIngredientes = document.getElementById('screen-ingredientes');
+  const secRecetas = document.getElementById('screen-recetas');
+  const secGastosFijos = document.getElementById('screen-gastosfijos');
+  if (secIngredientes) secIngredientes.style.display = costosSubtab === 'ingredientes' ? '' : 'none';
+  if (secRecetas) secRecetas.style.display = costosSubtab === 'recetas' ? '' : 'none';
+  if (secGastosFijos) secGastosFijos.style.display = costosSubtab === 'gastosfijos' ? '' : 'none';
+
+  if (costosSubtab === 'ingredientes') renderIngredientes();
+  else if (costosSubtab === 'recetas') renderRecetas();
+  else if (costosSubtab === 'gastosfijos') renderGastosFijosScreen();
 }
 
 /* -------- INICIO -------- */
@@ -1678,6 +1753,7 @@ function renderInicio() {
     ${renderNotifBanner()}
     ${renderAtrasadosBanner()}
     ${renderGastosFijosBanner()}
+    ${renderBackupBanner()}
     <div class="dash-grid">
     <!-- PRÓXIMO PEDIDO -->
     <div class="card anim-in" style="${prox && esAtrasado(prox) ? 'border:1.5px solid var(--red);background:var(--red-light)' : ''}">
@@ -1712,7 +1788,7 @@ function renderInicio() {
       <div class="text-sm text-muted mb-12">
         ${pct >= 60 ? '✅ Stock en buen nivel' : pct >= 30 ? '⚠️ Stock bajo — revisar' : '🔴 Stock crítico — reponer urgente'}
       </div>
-      <button class="btn btn-secondary btn-sm" onclick="navigate('ingredientes')">Ver stock completo</button>
+      <button class="btn btn-secondary btn-sm" onclick="navigateCostos('ingredientes')">Ver stock completo</button>
     </div>
 
     <!-- SALDO -->
@@ -1748,18 +1824,6 @@ function renderInicio() {
       </div>
       <button class="btn btn-secondary btn-sm" onclick="navigate('clientes')">Ver clientes</button>
     </div>
-    </div><!-- /dash-grid -->
-    <!-- POR COBRAR -->
-    <div class="card anim-in" style="animation-delay:.24s">
-      <div class="card-header">
-        <div class="card-title"><span class="card-icon">🧾</span> Por cobrar</div>
-      </div>
-      <div class="dash-saldo-big" style="color:${totalPorCobrar()>0?'var(--red)':'var(--text)'}">${fmt(totalPorCobrar())}</div>
-      <div class="text-sm text-muted mb-12">
-        ${totalPorCobrar() > 0 ? `📌 ${state.pedidos.filter(p=>!estaPagadoCompleto(p)).length} pedido${state.pedidos.filter(p=>!estaPagadoCompleto(p)).length !== 1 ? 's' : ''} sin cobrar` : '✅ Todo cobrado'}
-      </div>
-      <button class="btn btn-secondary btn-sm" onclick="navigate('clientes')">Ver clientes</button>
-    </div>
 
     <!-- BACKUP -->
     <div class="card anim-in" style="animation-delay:.30s">
@@ -1781,6 +1845,18 @@ let pedidoFiltroEstado = 'all';
 let pedidoFiltroPago = 'all';
 let pedidoVistaAgenda = false;   // false = Lista, true = Agenda semanal
 let agendaInicio = todayStr();   // fecha ISO del primer día visible en la agenda
+let pedidoBusqueda = '';
+
+function setPedidoBusqueda(v) {
+  pedidoBusqueda = v;
+  const activo = document.activeElement;
+  const cursor = (activo && activo.id === 'pedido-busqueda-input') ? activo.selectionStart : null;
+  renderPedidos();
+  if (cursor !== null) {
+    const input = document.getElementById('pedido-busqueda-input');
+    if (input) { input.focus(); input.setSelectionRange(cursor, cursor); }
+  }
+}
 
 function renderPedidos() {
   const el = document.getElementById('screen-pedidos');
@@ -1793,6 +1869,12 @@ function renderPedidos() {
       if (pedidoFiltroPago === 'partial') return montoPagadoDe(p) > 0 && !estaPagadoCompleto(p);
       return montoPagadoDe(p) <= 0; // 'unpaid'
     });
+  }
+  if (pedidoBusqueda.trim() !== '') {
+    const q = normalizarTexto(pedidoBusqueda.trim());
+    filtrados = filtrados.filter(p =>
+      normalizarTexto(p.cliente || '').includes(q) || normalizarTexto(p.producto || '').includes(q)
+    );
   }
 
   const sorted = [...filtrados].sort((a, b) => {
@@ -1837,6 +1919,11 @@ function renderPedidos() {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
       <div class="section-sub" style="margin-bottom:0">${state.pedidos.length} pedido${state.pedidos.length !== 1 ? 's' : ''} en total</div>
       <button class="btn btn-primary btn-sm" onclick="openPedidoForm(null)">+ Nuevo</button>
+    </div>
+
+    <div style="margin-top:10px">
+      <input class="form-input" id="pedido-busqueda-input" type="text" placeholder="Buscar cliente o producto..."
+        value="${(pedidoBusqueda || '').replace(/"/g,'&quot;')}" oninput="setPedidoBusqueda(this.value)">
     </div>
 
     <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center;margin-top:10px">
@@ -1940,17 +2027,17 @@ function renderPedidosAgenda(filtrados) {
       .sort((a, b) => (a.hora || '').localeCompare(b.hora || ''));
     const esHoy = fecha === hoy;
     return `
-      <div style="flex:0 0 150px;scroll-snap-align:start">
-        <div style="text-align:center;padding:8px 4px;border-radius:var(--radius-sm) var(--radius-sm) 0 0;
+      <div style="display:flex;gap:8px;scroll-snap-align:start">
+        <div style="flex:0 0 56px;text-align:center;padding:8px 4px;border-radius:var(--radius-sm);
           background:${esHoy ? 'var(--accent-light)' : 'var(--surface2)'};
-          border:1px solid var(--border);border-bottom:none">
+          border:1px solid var(--border);align-self:stretch;display:flex;flex-direction:column;justify-content:center">
           <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:${esHoy ? 'var(--accent)' : 'var(--text3)'}">${diaSemanaLabel(fecha)}</div>
           <div style="font-size:15px;font-weight:800;color:${esHoy ? 'var(--accent)' : 'var(--text)'}">${fecha.slice(8,10)}</div>
         </div>
-        <div style="border:1px solid var(--border);border-radius:0 0 var(--radius-sm) var(--radius-sm);
-          min-height:120px;padding:6px;display:flex;flex-direction:column;gap:6px;background:var(--surface)">
+        <div style="flex:1;min-width:0;border:1px solid var(--border);border-radius:var(--radius-sm);
+          min-height:56px;padding:6px;display:flex;flex-direction:column;gap:6px;background:var(--surface)">
           ${pedidosDia.length === 0
-            ? `<div style="text-align:center;color:var(--text3);font-size:11px;padding:16px 4px">Sin pedidos</div>`
+            ? `<div style="text-align:center;color:var(--text3);font-size:11px;padding:12px 4px">Sin pedidos</div>`
             : pedidosDia.map(p => pedidoCardMini(p)).join('')}
         </div>
       </div>`;
@@ -1967,7 +2054,7 @@ function renderPedidosAgenda(filtrados) {
       </div>
       <button class="btn btn-ghost btn-sm" onclick="cambiarSemanaAgenda(7)">Siguiente ›</button>
     </div>
-    <div style="display:flex;gap:8px;overflow-x:auto;scroll-snap-type:x proximity;padding-bottom:8px;-webkit-overflow-scrolling:touch">
+    <div style="display:flex;flex-direction:column;gap:8px;max-height:65vh;overflow-y:auto;scroll-snap-type:y proximity;padding-bottom:8px;-webkit-overflow-scrolling:touch">
       ${cols}
     </div>
   `;
@@ -1979,11 +2066,14 @@ function pedidoCardMini(p) {
     <div class="anim-in" onclick="openPedidoDetalle(${p.id})"
       style="cursor:pointer;background:var(--surface);border:1px solid var(--border);
         border-left:3px solid ${estadoColorVar(p.estado)};border-radius:6px;padding:6px 8px;
+        display:flex;align-items:center;gap:8px;
         ${atrasado ? 'outline:1px solid var(--red)' : ''}">
-      <div style="font-size:11px;font-weight:700;color:var(--text)">${p.hora || '--:--'}</div>
-      <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.cliente}</div>
-      <div style="font-size:10px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.producto}</div>
-      ${atrasado ? `<div style="font-size:9px;color:var(--red);font-weight:700">⚠️ Atrasado</div>` : ''}
+      <div style="flex:0 0 auto;font-size:11px;font-weight:700;color:var(--text)">${p.hora || '--:--'}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.cliente}</div>
+        <div style="font-size:10px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.producto}</div>
+      </div>
+      ${atrasado ? `<div style="flex:0 0 auto;font-size:9px;color:var(--red);font-weight:700">⚠️ Atrasado</div>` : ''}
     </div>
   `;
 }
@@ -2007,7 +2097,10 @@ ${itemsTexto}
 
 ¡Gracias por tu pedido! 💕`;
 
-  const url = `https://wa.me/?text=${encodeURIComponent(mensaje)}`;
+  const numero = (p.telefono || '').replace(/\D/g, '');
+  const url = numero
+    ? `https://wa.me/${numero}?text=${encodeURIComponent(mensaje)}`
+    : `https://wa.me/?text=${encodeURIComponent(mensaje)}`;
   window.open(url, '_blank');
 }
 
@@ -2043,13 +2136,13 @@ function marcarEntregado(id, fromDash) {
   if (!p || p.estado === 'done') return;
   p.estado = 'done';
   // auto-ingreso
-  const yaExiste = state.movimientos.some(m => m.auto && m.descripcion.includes(p.cliente) && m.descripcion.includes(p.producto.substring(0, 15)));
+  const yaExiste = state.movimientos.some(m => m.auto && m.pedidoId === p.id);
   let nuevoMov = null;
   if (!yaExiste) {
     nuevoMov = {
       id: nextId(), tipo: 'income',
       descripcion: `${p.producto} - ${p.cliente}`,
-      monto: p.precio, fecha: todayStr(), auto: true,
+      monto: p.precio, fecha: p.fechaEntrega, auto: true,
       pedidoId: p.id
     };
     state.movimientos.unshift(nuevoMov);
@@ -2434,6 +2527,14 @@ function openPedidoForm(id) {
       </div>
     </div>
 
+    <div class="form-group">
+      <label class="form-label">📱 Teléfono (WhatsApp)</label>
+      <input class="form-input" id="f-telefono" type="tel"
+        placeholder="Ej: 549341xxxxxxx (opcional)"
+        value="${p?.telefono || buscarTelefonoCliente(p?.cliente||'') || ''}"
+        autocomplete="off">
+    </div>
+
     <label class="form-label">Productos *</label>
     <div class="items-list" id="items-list"></div>
 
@@ -2808,8 +2909,24 @@ function initClienteAutocomplete() {
     },
     onSelect(opt) {
       input.value = opt.dataset.nombre;
+      const telInput = document.getElementById('f-telefono');
+      if (telInput && !telInput.value.trim()) {
+        const tel = buscarTelefonoCliente(opt.dataset.nombre);
+        if (tel) telInput.value = tel;
+      }
     },
   });
+}
+
+// Busca el teléfono más reciente cargado para un cliente (case/acento-insensible)
+function buscarTelefonoCliente(nombre) {
+  nombre = (nombre || '').trim();
+  if (!nombre) return '';
+  const norm = normalizarTexto(nombre);
+  const pedidosCliente = state.pedidos
+    .filter(p => normalizarTexto((p.cliente||'').trim()) === norm && p.telefono)
+    .sort((a, b) => (b.fechaEntrega||'').localeCompare(a.fechaEntrega||''));
+  return pedidosCliente.length > 0 ? pedidosCliente[0].telefono : '';
 }
 
 function initProductoAutocomplete() {
@@ -2943,6 +3060,7 @@ function savePedido(id) {
 
   const data = {
     cliente,
+    telefono: document.getElementById('f-telefono').value.trim(),
     producto,
     items: _pedidoItems,
     cantidad: _pedidoItems.reduce((s, i) => s + i.cantidad, 0),
@@ -2954,40 +3072,55 @@ function savePedido(id) {
     notas: document.getElementById('f-notas').value.trim(),
   };
 
-  if (id) {
-    const idx = state.pedidos.findIndex(p => p.id === id);
-    const itemsAnteriores = state.pedidos[idx].items || [];
-    // Ajustar stock: devolver lo descontado con los items viejos y
-    // volver a descontar según los items nuevos
-    revertirMateriaPrimaByPedido(itemsAnteriores);
-    const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
-    persistIngredientesDeItems([...itemsAnteriores, ..._pedidoItems]);
-    state.pedidos[idx] = { ...state.pedidos[idx], ...data };
-    persistItem('pedidos', state.pedidos[idx]);
-    saveState(); closeModal();
-    if (descuentos.length > 0) {
-      showToast('✏️ Pedido actualizado · 🧂 stock ajustado');
+  const procederGuardado = () => {
+    if (id) {
+      const idx = state.pedidos.findIndex(p => p.id === id);
+      const itemsAnteriores = state.pedidos[idx].items || [];
+      // Ajustar stock: devolver lo descontado con los items viejos y
+      // volver a descontar según los items nuevos
+      revertirMateriaPrimaByPedido(itemsAnteriores);
+      const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
+      persistIngredientesDeItems([...itemsAnteriores, ..._pedidoItems]);
+      state.pedidos[idx] = { ...state.pedidos[idx], ...data };
+      persistItem('pedidos', state.pedidos[idx]);
+      saveState(); closeModal();
+      if (descuentos.length > 0) {
+        showToast('✏️ Pedido actualizado · 🧂 stock ajustado');
+      } else {
+        showToast('✏️ Pedido actualizado');
+      }
     } else {
-      showToast('✏️ Pedido actualizado');
+      const nuevoPedido = { id: nextId(), ...data };
+      state.pedidos.push(nuevoPedido);
+      // Descontar materia prima según recetas
+      const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
+      persistIngredientesDeItems(_pedidoItems);
+      persistItem('pedidos', nuevoPedido);
+      saveState(); closeModal();
+      if (descuentos.length > 0) {
+        showToast('📦 Pedido creado · 🧂 ' + descuentos.slice(0, 3).join(', ') + (descuentos.length > 3 ? ' y más...' : ''));
+      } else {
+        showToast('📦 Pedido creado');
+      }
     }
+    renderScreen(activeScreen);
+    // Esperar un tick para que el SW esté listo antes de programar
+    if (Notification.permission === 'granted') {
+      setTimeout(() => programarAlertas1Hora(), 500);
+    }
+  };
+
+  // Avisar si no alcanza el stock de materia prima, sin bloquear el guardado
+  const advertenciasStock = verificarStockSuficiente(_pedidoItems);
+  if (advertenciasStock.length > 0) {
+    const detalle = advertenciasStock.map(a => `${a.ingrediente}: faltan ${a.faltante} ${a.unidad}`).join(' · ');
+    showConfirm(
+      '⚠️ Stock insuficiente',
+      `No alcanza la materia prima para este pedido — ${detalle}. ¿Guardar igual?`,
+      procederGuardado
+    );
   } else {
-    const nuevoPedido = { id: nextId(), ...data };
-    state.pedidos.push(nuevoPedido);
-    // Descontar materia prima según recetas
-    const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
-    persistIngredientesDeItems(_pedidoItems);
-    persistItem('pedidos', nuevoPedido);
-    saveState(); closeModal();
-    if (descuentos.length > 0) {
-      showToast('📦 Pedido creado · 🧂 ' + descuentos.slice(0, 3).join(', ') + (descuentos.length > 3 ? ' y más...' : ''));
-    } else {
-      showToast('📦 Pedido creado');
-    }
-  }
-  renderScreen(activeScreen);
-  // Esperar un tick para que el SW esté listo antes de programar
-  if (Notification.permission === 'granted') {
-    setTimeout(() => programarAlertas1Hora(), 500);
+    procederGuardado();
   }
 }
 
@@ -3023,6 +3156,7 @@ function renderRecetas() {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
       <div class="section-sub" style="margin-bottom:0">Se descuentan automáticamente en Materia prima al crear un pedido</div>
       <div style="display:flex;gap:6px">
+        <button class="btn btn-ghost btn-sm" onclick="openConfigCostosForm()" title="Configurar costo de mano de obra y gastos fijos">⚙️</button>
         <button class="btn btn-ghost btn-sm" onclick="openCatalogo()">🛒 Productos</button>
         <button class="btn btn-primary btn-sm" onclick="openRecetaForm(null)">+ Receta</button>
       </div>
@@ -3061,16 +3195,6 @@ function renderGastosFijosScreen() {
     </div>
     <div style="height:10px"></div>
     ${renderGastosFijosList()}
-
-    <div style="height:16px"></div>
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div class="section-title" style="margin-bottom:0;font-size:16px">📊 Costo real vs. precio</div>
-      <div style="display:flex;gap:6px">
-        <button class="btn btn-ghost btn-sm" onclick="openConfigCostosForm()">⚙️ Configuración</button>
-        <button class="btn btn-primary btn-sm" onclick="openCostosReales()">Ver márgenes</button>
-      </div>
-    </div>
-    <div class="section-sub">Compara el costo real de cada receta contra el precio de venta del catálogo · ${state.config.horasProductivasMes} hs/mes · ${fmt(state.config.valorHora)}/hora</div>
   `;
 }
 
@@ -3214,7 +3338,7 @@ function saveConfigCostos() {
   state.config.valorHora = parsePrecio(document.getElementById('f-cfg-valorhora').value);
   saveState(); closeModal();
   showToast('⚙️ Configuración actualizada');
-  renderGastosFijosScreen();
+  renderScreen(activeScreen);
 }
 
 function ingredienteItem(i) {
@@ -3247,6 +3371,14 @@ function openSumarStock(id) {
       <label class="form-label">${i.nombre} — Stock actual: ${i.stock} ${i.unidad}</label>
       <input class="form-input" id="f-suma" type="number" min="0" step="0.1" placeholder="Cantidad a agregar...">
     </div>
+    <div class="form-group">
+      <label class="form-label">💰 Costo de esta compra ($)</label>
+      <input class="form-input" id="f-costo-compra" type="text" inputmode="decimal"
+        placeholder="Ej: 2.500 (opcional)">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">
+        Si lo cargás, se recalcula el costo unitario (promedio ponderado) y se registra el egreso en Finanzas. Dejalo vacío para solo sumar stock.
+      </div>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
       <button class="btn btn-primary w-100" onclick="sumarStock(${id})">+ Agregar</button>
@@ -3258,10 +3390,36 @@ function sumarStock(id) {
   const v = parseFloat(document.getElementById('f-suma').value);
   if (!v || v <= 0) { showToast('⚠️ Ingresá una cantidad válida'); return; }
   const i = state.ingredientes.find(x => x.id === id);
+
+  const costoCompraEl = document.getElementById('f-costo-compra');
+  const costoCompra = costoCompraEl ? parsePrecio(costoCompraEl.value) : 0;
+
+  if (costoCompra > 0) {
+    const costoTotal = (i.stock * (i.costoUnitario||0)) + costoCompra;
+    const stockTotal = i.stock + v;
+    i.costoUnitario = stockTotal > 0 ? Math.round((costoTotal/stockTotal)*100)/100 : i.costoUnitario;
+  }
+
   i.stock = Math.round((i.stock + v) * 100) / 100;
   persistItem('ingredientes', i);
-  saveState(); closeModal();
-  showToast('✅ Stock actualizado');
+
+  if (costoCompra > 0) {
+    const nuevoMov = {
+      id: nextId(),
+      tipo: 'expense',
+      descripcion: `Compra de ${i.nombre}`,
+      monto: costoCompra,
+      fecha: todayStr(),
+      auto: true,
+    };
+    state.movimientos.unshift(nuevoMov);
+    persistItem('movimientos', nuevoMov);
+    saveState(); closeModal();
+    showToast(`✅ Stock actualizado · 💸 Egreso de ${fmt(costoCompra)} registrado en Finanzas`);
+  } else {
+    saveState(); closeModal();
+    showToast('✅ Stock actualizado');
+  }
   renderIngredientes();
 }
 
@@ -3341,7 +3499,7 @@ function saveIngrediente(id) {
   const data = {
     nombre,
     stock: stockVal,
-    ideal: parseFloat(document.getElementById('f-ideal').value) || 1,
+    ideal: Math.max(0.01, parseFloat(document.getElementById('f-ideal').value) || 1),
     unidad: document.getElementById('f-unidad').value,
     costoUnitario,
   };
@@ -3353,7 +3511,7 @@ function saveIngrediente(id) {
     saveState(); closeModal();
     showToast('✏️ Ingrediente actualizado');
   } else {
-    const nuevoIng = { id: nextId(), ...data };
+    const nuevoIng = { id: nextId(), ultimaAlertaStockBajo: null, ...data };
     state.ingredientes.push(nuevoIng);
     persistItem('ingredientes', nuevoIng);
     // Auto-registrar egreso si se ingresó un costo
@@ -3417,7 +3575,7 @@ function renderRecetasList() {
     return `
       <div class="receta-card">
         <div class="receta-card-header">
-          <div class="receta-card-nombre">${r.producto}</div>
+          <div class="receta-card-nombre">${r.producto} ${renderMargenBadgeReceta(r)}</div>
           <div class="receta-card-rinde">Rinde: ${r.rinde} ${r.unidadRinde}</div>
         </div>
         <div style="font-size:11px;color:var(--text3);margin-bottom:8px">${tiempoTxt} · ${hornoTxt}${r.mermaPct ? ` · 📉 ${r.mermaPct}% merma` : ''}</div>
@@ -3773,6 +3931,49 @@ function esPorcion(nombreItem) {
   return /\(porción\)\s*$/i.test(nombreItem);
 }
 
+/**
+ * Simula el descuento que haría descontarMateriaPrimaByPedido para los items
+ * dados, SIN modificar el stock real. Devuelve advertencias para cada
+ * ingrediente cuyo stock actual no alcance para cubrir el descuento.
+ */
+function verificarStockSuficiente(items) {
+  const necesarios = new Map(); // ingId -> cantidad total necesaria
+
+  items.forEach(item => {
+    const esItemPorcion = esPorcion(item.producto);
+    const nombreBase = esItemPorcion ? nombreBaseProducto(item.producto) : item.producto;
+    const receta = state.recetas.find(r => r.producto === nombreBase);
+    if (!receta || !receta.ingredientes || receta.ingredientes.length === 0) return;
+
+    let factor;
+    if (esItemPorcion) {
+      const porciones = receta.porcionesPorUnidad || 1;
+      factor = (item.cantidad / porciones) / receta.rinde;
+    } else {
+      factor = item.cantidad / receta.rinde;
+    }
+
+    receta.ingredientes.forEach(ri => {
+      const cantDescontar = Math.round(ri.cantidad * factor * 1000) / 1000;
+      necesarios.set(ri.ingId, Math.round(((necesarios.get(ri.ingId) || 0) + cantDescontar) * 1000) / 1000);
+    });
+  });
+
+  const advertencias = [];
+  necesarios.forEach((necesario, ingId) => {
+    const ing = state.ingredientes.find(x => x.id === ingId);
+    if (!ing) return;
+    if (ing.stock < necesario) {
+      advertencias.push({
+        ingrediente: ing.nombre,
+        faltante: Math.round((necesario - ing.stock) * 1000) / 1000,
+        unidad: ing.unidad,
+      });
+    }
+  });
+  return advertencias;
+}
+
 function descontarMateriaPrimaByPedido(items) {
   const descuentos = [];
   items.forEach(item => {
@@ -3851,6 +4052,21 @@ function costoGasPorMinuto() {
   return costoDiario / 60; // 60 min = la 1 hora de horno diaria
 }
 
+// Costo fijo por hora productiva: suma todos los gastos fijos mensualizados
+// (excepto 'gas', que ya se prorratea aparte por minuto de horno) y los
+// divide por las horas productivas del mes.
+function costoFijoPorHoraProductiva() {
+  const horas = state.config.horasProductivasMes;
+  if (!horas) return 0;
+  const totalMensual = (state.gastosFijos || [])
+    .filter(g => g.tipo !== 'gas')
+    .reduce((acc, g) => {
+      if (!g.cadaXDias) return acc;
+      return acc + (g.monto / g.cadaXDias) * 30;
+    }, 0);
+  return totalMensual / horas;
+}
+
 // Desglose de costo real de una receta, por unidad de venta
 function calcularCostoReceta(receta) {
   if (!receta || !receta.rinde) return null;
@@ -3868,13 +4084,15 @@ function calcularCostoReceta(receta) {
   const minutosHorno = receta.minutosHorno || 0;
   const gasUnit = (minutosHorno * costoGasPorMinuto()) / receta.rinde;
 
-  const subtotalUnit = materiaPrimaUnit + manoObraUnit + gasUnit;
+  const gastosFijosUnit = (horasReceta * costoFijoPorHoraProductiva()) / receta.rinde;
+
+  const subtotalUnit = materiaPrimaUnit + manoObraUnit + gasUnit + gastosFijosUnit;
   const mermaPct = receta.mermaPct || 0;
   const factorMerma = mermaPct > 0 ? 1 / (1 - mermaPct / 100) : 1;
   const costoRealUnit = subtotalUnit * factorMerma;
 
   return {
-    materiaPrimaUnit, manoObraUnit, gasUnit,
+    materiaPrimaUnit, manoObraUnit, gasUnit, gastosFijosUnit,
     subtotalUnit, factorMerma, costoRealUnit,
   };
 }
@@ -3934,6 +4152,72 @@ function margenColor(m) {
   return { color: 'var(--green)', bg: 'var(--green-light)', label: 'Buen margen' };
 }
 
+// Devuelve qué datos le faltan a una receta para que el costo real sea confiable.
+// No modifica calcularCostoReceta/calcularMargenProducto, solo diagnostica sus inputs.
+function datosFaltantesReceta(receta) {
+  if (!receta) return ['la receta'];
+  const faltan = [];
+  if (!receta.rinde) faltan.push('rinde de la receta');
+  if (!receta.ingredientes || receta.ingredientes.length === 0) faltan.push('ingredientes cargados');
+  if (!receta.tiempoMinutos) faltan.push('tiempo de preparación');
+  return faltan;
+}
+
+// Badge de margen (+32% / -15% / sin datos) que va al lado del nombre de la receta en la lista
+function renderMargenBadgeReceta(receta) {
+  const nombreEscapado = receta.producto.replace(/'/g, "\\'");
+  const faltantes = datosFaltantesReceta(receta);
+  const m = calcularMargenProducto(receta.producto);
+
+  if (!m || m.sinReceta || m.margenPct === null || faltantes.length > 0) {
+    return `<span class="receta-margen" style="font-size:12px;font-weight:600;color:var(--text3);cursor:pointer" onclick="openMargenRecetaModal('${nombreEscapado}')">(sin datos de costo)</span>`;
+  }
+  const positivo = m.margenPct >= 0;
+  const color = positivo ? 'var(--green)' : 'var(--red)';
+  const signo = positivo ? '+' : '';
+  return `<span class="receta-margen" style="font-size:12px;font-weight:600;color:${color};cursor:pointer" onclick="openMargenRecetaModal('${nombreEscapado}')">(${signo}${Math.round(m.margenPct)}%)</span>`;
+}
+
+// Modal con el detalle del costo real vs. precio de UNA receta (reemplaza a la vista comparativa global)
+function openMargenRecetaModal(nombreProducto) {
+  const receta = state.recetas.find(r => r.producto === nombreProducto);
+  const faltantes = datosFaltantesReceta(receta);
+  const m = calcularMargenProducto(nombreProducto);
+
+  if (!m || m.sinReceta) {
+    openModal(`
+      <div class="modal-title">📊 ${nombreProducto}</div>
+      <div class="empty-state"><div class="empty-icon">⚠️</div><p>Faltan datos para calcular el costo real: ${faltantes.length ? faltantes.join(', ') : 'datos de la receta'}.</p></div>
+      <div class="modal-actions"><button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button></div>
+    `);
+    return;
+  }
+
+  const c = margenColor(m);
+  const avisoFaltantes = faltantes.length > 0
+    ? `<div style="font-size:11px;color:var(--yellow);background:var(--yellow-light);padding:8px;border-radius:8px;margin-bottom:10px">⚠️ El cálculo puede ser inexacto: falta ${faltantes.join(', ')}.</div>`
+    : '';
+
+  openModal(`
+    <div class="modal-title">📊 ${nombreProducto}</div>
+    ${avisoFaltantes}
+    <div class="detail-row"><span class="label">Precio de venta</span><span class="value">${m.precioVenta ? fmt(m.precioVenta) : '— sin precio en catálogo'}</span></div>
+    <div class="detail-row"><span class="label">🧂 Materia prima</span><span class="value">${fmt(m.materiaPrimaUnit)}</span></div>
+    <div class="detail-row"><span class="label">⏱️ Mano de obra</span><span class="value">${fmt(m.manoObraUnit)} <span style="color:var(--text3);font-size:11px">(${fmt(state.config.valorHora)}/hora)</span></span></div>
+    <div class="detail-row"><span class="label">🔥 Gas</span><span class="value">${fmt(m.gasUnit)}</span></div>
+    <div class="detail-row"><span class="label">📋 Gastos fijos</span><span class="value">${fmt(m.gastosFijosUnit)}</span></div>
+    ${m.factorMerma > 1 ? `<div class="detail-row"><span class="label">📉 Ajuste por merma</span><span class="value">×${m.factorMerma.toFixed(2)}</span></div>` : ''}
+    <div class="detail-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:8px">
+      <span class="label fw-600">Costo total</span><span class="value fw-600">${fmt(m.costoRealUnit)}</span>
+    </div>
+    ${m.margen !== null ? `
+      <div class="detail-row"><span class="label fw-600">${m.margen >= 0 ? 'Ganancia' : 'Pérdida'}</span><span class="value fw-600" style="color:${c.color}">${fmt(m.margen)} (${m.margen >= 0 ? '+' : ''}${m.margenPct.toFixed(0)}%)</span></div>
+    ` : `<div class="detail-row"><span class="label fw-600">Margen</span><span class="value" style="color:var(--text3)">Sin precio de venta cargado</span></div>`}
+    <div class="modal-actions"><button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button></div>
+  `);
+}
+window.openMargenRecetaModal = openMargenRecetaModal;
+
 function openCostosReales() {
   const margenes = calcularTodosLosMargenes();
 
@@ -3958,6 +4242,7 @@ function openCostosReales() {
         <div class="detail-row"><span class="label">🧂 Materia prima</span><span class="value">${fmt(m.materiaPrimaUnit)}</span></div>
         <div class="detail-row"><span class="label">⏱️ Mano de obra</span><span class="value">${fmt(m.manoObraUnit)}</span></div>
         <div class="detail-row"><span class="label">🔥 Gas</span><span class="value">${fmt(m.gasUnit)}</span></div>
+        <div class="detail-row"><span class="label">📋 Gastos fijos</span><span class="value">${fmt(m.gastosFijosUnit)}</span></div>
         ${m.factorMerma > 1 ? `<div class="detail-row"><span class="label">📉 Ajuste por merma</span><span class="value">×${m.factorMerma.toFixed(2)}</span></div>` : ''}
         <div class="detail-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:8px">
           <span class="label fw-600">Costo real</span><span class="value fw-600">${fmt(m.costoRealUnit)}</span>
@@ -4022,9 +4307,86 @@ function initIngNombreAutocomplete(editingId) {
 }
 
 /* -------- FINANZAS -------- */
-let finanzasVista = 'lista'; // 'lista' | 'dia' | 'calendario'
+let finanzasVista = 'lista'; // 'lista' | 'dia' | 'calendario' | 'reportes'
 let finanzasDiaExpandido = null;
 let finanzasAgendaInicio = todayStr(); // fecha ISO del primer día visible en el calendario de finanzas
+
+/* ============================================================
+   REPORTES: cálculos (separados del render)
+============================================================ */
+// Devuelve la fecha ISO del lunes de la semana a la que pertenece fechaStr
+function lunesDeSemana(fechaStr) {
+  const [y, m, d] = fechaStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  const dow = dt.getDay(); // 0=dom .. 6=sáb
+  const diff = dow === 0 ? -6 : 1 - dow;
+  dt.setDate(dt.getDate() + diff);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+// Agrupa state.movimientos por semana (lunes a domingo) — O(n) sobre movimientos + O(cantSemanas)
+function calcularIngresosEgresosPorSemana(cantSemanas = 8) {
+  const mapa = new Map(); // lunes -> { ingresos, egresos }
+  state.movimientos.forEach(m => {
+    if (!m.fecha) return;
+    const inicio = lunesDeSemana(m.fecha);
+    let bucket = mapa.get(inicio);
+    if (!bucket) { bucket = { ingresos: 0, egresos: 0 }; mapa.set(inicio, bucket); }
+    if (m.tipo === 'income') bucket.ingresos += m.monto;
+    else bucket.egresos += m.monto;
+  });
+
+  const hoyInicio = lunesDeSemana(todayStr());
+  const semanas = [];
+  for (let i = cantSemanas - 1; i >= 0; i--) {
+    const inicio = addDiasStr(hoyInicio, -7 * i);
+    const bucket = mapa.get(inicio) || { ingresos: 0, egresos: 0 };
+    semanas.push({
+      inicio,
+      fin: addDiasStr(inicio, 6),
+      ingresos: bucket.ingresos,
+      egresos: bucket.egresos,
+      saldo: bucket.ingresos - bucket.egresos,
+    });
+  }
+  return semanas;
+}
+
+// Top productos por cantidad vendida (suma de p.items[].cantidad en todos los pedidos) — O(n)
+function calcularTopProductosPorCantidad(top = 5) {
+  const mapa = new Map();
+  state.pedidos.forEach(p => {
+    (p.items || []).forEach(it => {
+      const nombre = (it.producto || '').trim();
+      if (!nombre) return;
+      mapa.set(nombre, (mapa.get(nombre) || 0) + (Number(it.cantidad) || 0));
+    });
+  });
+  return [...mapa.entries()]
+    .map(([producto, cantidad]) => ({ producto, cantidad }))
+    .sort((a, b) => b.cantidad - a.cantidad)
+    .slice(0, top);
+}
+
+// Top productos por ingresos generados (suma de p.items[].subtotal en pedidos entregados) — O(n)
+function calcularTopProductosPorIngresos(top = 5) {
+  const mapa = new Map();
+  state.pedidos.forEach(p => {
+    if (p.estado !== 'done') return;
+    (p.items || []).forEach(it => {
+      const nombre = (it.producto || '').trim();
+      if (!nombre) return;
+      mapa.set(nombre, (mapa.get(nombre) || 0) + (Number(it.subtotal) || 0));
+    });
+  });
+  return [...mapa.entries()]
+    .map(([producto, ingresos]) => ({ producto, ingresos }))
+    .sort((a, b) => b.ingresos - a.ingresos)
+    .slice(0, top);
+}
 
 function renderFinanzas() {
   const el = document.getElementById('screen-finanzas');
@@ -4111,16 +4473,23 @@ function renderFinanzas() {
             border:2px solid ${finanzasVista==='calendario'?'var(--accent)':'var(--border)'};
             background:${finanzasVista==='calendario'?'var(--accent-light)':'var(--surface)'};
             color:${finanzasVista==='calendario'?'var(--accent)':'var(--text2)'}">Calendario</div>
+        <div onclick="setFinanzasVista('reportes')"
+          style="padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;
+            border:2px solid ${finanzasVista==='reportes'?'var(--accent)':'var(--border)'};
+            background:${finanzasVista==='reportes'?'var(--accent-light)':'var(--surface)'};
+            color:${finanzasVista==='reportes'?'var(--accent)':'var(--text2)'}">📊 Reportes</div>
       </div>
     </div>
 
     ${finanzasVista === 'calendario'
       ? renderFinanzasCalendario(movs)
-      : movs.length === 0
-        ? `<div class="empty-state"><div class="empty-icon">💸</div><p>Sin movimientos aún</p></div>`
-        : finanzasVista === 'dia'
-          ? renderMovsPorDia()
-          : movs.map(m => finanzaItem(m)).join('')
+      : finanzasVista === 'reportes'
+        ? renderReportes()
+        : movs.length === 0
+          ? `<div class="empty-state"><div class="empty-icon">💸</div><p>Sin movimientos aún</p></div>`
+          : finanzasVista === 'dia'
+            ? renderMovsPorDia()
+            : movs.map(m => finanzaItem(m)).join('')
     }
   `;
 }
@@ -4180,6 +4549,105 @@ function renderFinanzasCalendario(movs) {
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(130px, 1fr));gap:8px">
       ${cols}
+    </div>
+  `;
+}
+
+/* -------- REPORTES: render -------- */
+function renderReportes() {
+  const semanas = calcularIngresosEgresosPorSemana(8);
+  const topCantidad = calcularTopProductosPorCantidad(5);
+  const topIngresos = calcularTopProductosPorIngresos(5);
+
+  const rankRow = (label, valueLabel, pct, colorVar) => `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;margin-bottom:4px">
+          <span style="font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${label}</span>
+          <span style="font-weight:700;color:${colorVar};white-space:nowrap">${valueLabel}</span>
+        </div>
+        <div style="background:var(--surface2);border-radius:6px;height:7px;overflow:hidden">
+          <div style="width:${pct}%;height:100%;background:${colorVar};border-radius:6px"></div>
+        </div>
+      </div>
+    </div>`;
+
+  const maxCant = Math.max(1, ...topCantidad.map(t => t.cantidad));
+  const maxIng = Math.max(1, ...topIngresos.map(t => t.ingresos));
+
+  return `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-bottom:16px;box-shadow:var(--shadow)">
+      <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:10px">Ingresos vs egresos · últimas 8 semanas</div>
+      ${renderBarChartFinanzas(semanas)}
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr;gap:12px">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;box-shadow:var(--shadow)">
+        <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:12px">🏆 Top 5 · más vendidos</div>
+        ${topCantidad.length === 0
+          ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">Todavía no hay pedidos con productos cargados</p></div>`
+          : topCantidad.map(t => rankRow(t.producto, `${t.cantidad} un.`, Math.max(6, (t.cantidad / maxCant) * 100), 'var(--accent)')).join('')
+        }
+      </div>
+
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;box-shadow:var(--shadow)">
+        <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:12px">💰 Top 5 · más ingresos generados</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:10px;margin-top:-6px">Sobre pedidos entregados</div>
+        ${topIngresos.length === 0
+          ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">Todavía no hay pedidos entregados</p></div>`
+          : topIngresos.map(t => rankRow(t.producto, fmt(t.ingresos), Math.max(6, (t.ingresos / maxIng) * 100), 'var(--green)')).join('')
+        }
+      </div>
+    </div>
+  `;
+}
+
+// SVG de barras agrupadas (ingresos/egresos por semana), responsive vía viewBox
+function renderBarChartFinanzas(semanas) {
+  const W = 700, H = 220;
+  const padL = 34, padR = 8, padT = 10, padB = 26;
+  const chartW = W - padL - padR;
+  const chartH = H - padT - padB;
+  const n = semanas.length || 1;
+  const maxVal = Math.max(1, ...semanas.map(s => Math.max(s.ingresos, s.egresos)));
+  const slotW = chartW / n;
+  const barW = Math.max(4, Math.min(16, slotW * 0.32));
+  const gap = 3;
+
+  const gridLines = [0, 1, 2, 3, 4].map(i => {
+    const y = padT + chartH - (chartH * i / 4);
+    const val = Math.round(maxVal * i / 4);
+    const valLabel = val >= 1000 ? Math.round(val / 1000) + 'k' : String(val);
+    return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--border)" stroke-width="1"/>
+      <text x="${padL - 6}" y="${(y + 3).toFixed(1)}" font-size="9" fill="var(--text3)" text-anchor="end">${valLabel}</text>`;
+  }).join('');
+
+  const bars = semanas.map((s, i) => {
+    const xSlot = padL + i * slotW;
+    const cx = xSlot + slotW / 2;
+    const hIng = (s.ingresos / maxVal) * chartH;
+    const hEg = (s.egresos / maxVal) * chartH;
+    const xIng = cx - barW - gap / 2;
+    const xEg = cx + gap / 2;
+    const yIng = padT + chartH - hIng;
+    const yEg = padT + chartH - hEg;
+    const label = `${s.inicio.slice(8, 10)}/${s.inicio.slice(5, 7)}`;
+    return `
+      <rect x="${xIng.toFixed(1)}" y="${yIng.toFixed(1)}" width="${barW.toFixed(1)}" height="${hIng.toFixed(1)}" rx="2" fill="var(--green)"/>
+      <rect x="${xEg.toFixed(1)}" y="${yEg.toFixed(1)}" width="${barW.toFixed(1)}" height="${hEg.toFixed(1)}" rx="2" fill="var(--red)"/>
+      <text x="${cx.toFixed(1)}" y="${H - 8}" font-size="9" fill="var(--text3)" text-anchor="middle">${label}</text>
+    `;
+  }).join('');
+
+  return `
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" xmlns="http://www.w3.org/2000/svg">
+      ${gridLines}
+      ${bars}
+      <line x1="${padL}" y1="${(padT + chartH).toFixed(1)}" x2="${W - padR}" y2="${(padT + chartH).toFixed(1)}" stroke="var(--border)" stroke-width="1.5"/>
+    </svg>
+    <div style="display:flex;gap:16px;justify-content:center;margin-top:8px;font-size:11px;color:var(--text2)">
+      <span><span style="display:inline-block;width:10px;height:10px;background:var(--green);border-radius:2px;margin-right:4px;vertical-align:middle"></span>Ingresos</span>
+      <span><span style="display:inline-block;width:10px;height:10px;background:var(--red);border-radius:2px;margin-right:4px;vertical-align:middle"></span>Egresos</span>
     </div>
   `;
 }
@@ -4532,26 +5000,50 @@ function getClientes() {
   state.pedidos.forEach(p => {
     const nombre = p.cliente.trim();
     if (!nombre) return;
-    if (!mapa[nombre]) {
-      mapa[nombre] = { nombre, pedidos: [], totalGastado: 0, totalAdeudado: 0, ultimoPedido: '' };
+    const key = normalizarTexto(nombre);
+    if (!mapa[key]) {
+      // Se conserva la primera variante de escritura encontrada como nombre a mostrar
+      mapa[key] = { nombre, pedidos: [], totalGastado: 0, totalAdeudado: 0, ultimoPedido: '', telefono: '' };
     }
-    mapa[nombre].pedidos.push(p);
-    mapa[nombre].totalGastado += p.precio || 0;
-    mapa[nombre].totalAdeudado += saldoPendiente(p);
-    if (!mapa[nombre].ultimoPedido || p.fechaEntrega > mapa[nombre].ultimoPedido) {
-      mapa[nombre].ultimoPedido = p.fechaEntrega;
+    mapa[key].pedidos.push(p);
+    mapa[key].totalGastado += p.precio || 0;
+    mapa[key].totalAdeudado += saldoPendiente(p);
+    if (!mapa[key].ultimoPedido || p.fechaEntrega > mapa[key].ultimoPedido) {
+      mapa[key].ultimoPedido = p.fechaEntrega;
+      if (p.telefono) mapa[key].telefono = p.telefono;
     }
   });
   // Prioridad: primero quienes más deben, luego por total gastado
   return Object.values(mapa).sort((a, b) => b.totalAdeudado - a.totalAdeudado || b.totalGastado - a.totalGastado);
 }
 
+let clienteBusqueda = '';
+
+function setClienteBusqueda(v) {
+  clienteBusqueda = v;
+  const activo = document.activeElement;
+  const cursor = (activo && activo.id === 'cliente-busqueda-input') ? activo.selectionStart : null;
+  renderClientes();
+  if (cursor !== null) {
+    const input = document.getElementById('cliente-busqueda-input');
+    if (input) { input.focus(); input.setSelectionRange(cursor, cursor); }
+  }
+}
+
 function renderClientes() {
   const el = document.getElementById('screen-clientes');
-  const clientes = getClientes();
+  let clientes = getClientes();
+  if (clienteBusqueda.trim() !== '') {
+    const q = normalizarTexto(clienteBusqueda.trim());
+    clientes = clientes.filter(c => normalizarTexto(c.nombre || '').includes(q));
+  }
   const conDeuda = clientes.filter(c => c.totalAdeudado > 0).length;
 
   el.innerHTML = `
+    <div style="margin-bottom:12px">
+      <input class="form-input" id="cliente-busqueda-input" type="text" placeholder="Buscar cliente..."
+        value="${(clienteBusqueda || '').replace(/"/g,'&quot;')}" oninput="setClienteBusqueda(this.value)">
+    </div>
     <div class="section-sub" style="margin-bottom:16px">${clientes.length} cliente${clientes.length !== 1 ? 's' : ''} registrado${clientes.length !== 1 ? 's' : ''}${conDeuda > 0 ? ` · ${conDeuda} con saldo pendiente` : ''}</div>
     ${clientes.length === 0
       ? `<div class="empty-state"><div class="empty-icon">👥</div><p>Aún no hay clientes registrados</p></div>`
@@ -4616,7 +5108,7 @@ function clienteCard(c) {
 }
 
 function openClienteDetalle(nombre) {
-  const c = getClientes().find(x => x.nombre === nombre);
+  const c = getClientes().find(x => normalizarTexto(x.nombre) === normalizarTexto(nombre));
   if (!c) return;
   const pedidosOrdenados = [...c.pedidos].sort((a, b) => b.fechaEntrega.localeCompare(a.fechaEntrega));
   openModal(`
@@ -4635,6 +5127,12 @@ function openClienteDetalle(nombre) {
         <div class="amount">${fmt(c.totalAdeudado)}</div>
       </div>
     </div>
+    ${c.telefono ? `
+      <div class="flex gap-8 mb-12" style="align-items:center">
+        <span class="badge">📱 ${c.telefono}</span>
+        <button class="btn btn-secondary btn-sm" onclick="window.open('https://wa.me/${c.telefono.replace(/\D/g,'')}','_blank')">📱 Abrir WhatsApp</button>
+      </div>
+    ` : ''}
     ${c.totalAdeudado > 0 ? `
       <div class="flex gap-8 mb-12" style="align-items:center">
         <span class="badge badge-unpaid">⚠️ Saldo pendiente: ${fmt(c.totalAdeudado)}</span>
@@ -4659,7 +5157,8 @@ function openClienteDetalle(nombre) {
 }
 
 function marcarTodosPagados(nombre) {
-  const pendientes = state.pedidos.filter(p => p.cliente.trim() === nombre && !estaPagadoCompleto(p));
+  const nombreNorm = normalizarTexto(nombre);
+  const pendientes = state.pedidos.filter(p => normalizarTexto(p.cliente.trim()) === nombreNorm && !estaPagadoCompleto(p));
   if (pendientes.length === 0) return;
   const total = pendientes.reduce((s, p) => s + saldoPendiente(p), 0);
   showConfirm(
@@ -4926,11 +5425,38 @@ function renderGastosFijosBanner() {
           <div style="font-size:11px;color:var(--text2)">Gas, papelería u otros gastos recurrentes</div>
         </div>
       </div>
-      <button class="btn btn-primary btn-sm" style="background:${color}" onclick="navigate('gastosfijos')">Ver gastos</button>
+      <button class="btn btn-primary btn-sm" style="background:${color}" onclick="navigateCostos('gastosfijos')">Ver gastos</button>
     </div>
   </div>`;
 }
 
+function renderBackupBanner() {
+  const dias = diasSinBackup();
+  const nunca = dias === null;
+  if (!nunca && dias <= 20) return '';
+  if (sessionStorage.getItem('toque_backup_banner_oculto') === '1') return '';
+  const texto = nunca ? 'Nunca hiciste un backup' : `Hace ${dias} días que no hacés un backup`;
+  return `<div class="card" style="background:var(--yellow-light);border-color:var(--yellow);margin-bottom:12px" id="backup-banner">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:20px">📦</span>
+        <div>
+          <div style="font-weight:600;font-size:13px;color:var(--yellow)">${texto}</div>
+          <div style="font-size:11px;color:var(--text2)">Copia local de seguridad, aparte de la nube</div>
+        </div>
+      </div>
+      <div class="flex gap-8">
+        <button class="btn btn-primary btn-sm" style="background:var(--yellow)" onclick="exportarDatos()">Hacer backup</button>
+        <button class="btn btn-ghost btn-sm" onclick="ocultarBackupBanner()">Ahora no</button>
+      </div>
+    </div>
+  </div>`;
+}
+function ocultarBackupBanner() {
+  sessionStorage.setItem('toque_backup_banner_oculto', '1');
+  const el = document.getElementById('backup-banner');
+  if (el) el.remove();
+}
 function renderNotifBanner() {
   if (!('Notification' in window)) return '';
   // Si ya está concedido o denegado, no mostrar banner (se muestra en la campanita)
@@ -5029,14 +5555,19 @@ window.testNotif = testNotifSW;
 
 updateHeaderDate();
 registrarSW().then(() => {
-  loadFromFirebase().then(() => {
-    setupRealtimeSync();
-    if (Notification.permission === 'granted') {
-      programarNotificacionDiaria();
-      programarAlertas1Hora();
-      registrarTokenFCM(); // refresca el token por si cambió
-    }
-    updateBellIcon();
+  // Esperamos a tener sesión anónima ANTES de leer/escribir Firestore,
+  // porque con las reglas nuevas (request.auth != null) cualquier
+  // llamada sin auth va a ser rechazada.
+  authReadyPromise.then(() => {
+    loadFromFirebase().then(() => {
+      setupRealtimeSync();
+      if (Notification.permission === 'granted') {
+        programarNotificacionDiaria();
+        programarAlertas1Hora();
+        registrarTokenFCM(); // refresca el token por si cambió
+      }
+      updateBellIcon();
+    });
   });
 });
 </script>

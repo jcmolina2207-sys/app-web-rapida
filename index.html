@@ -907,6 +907,9 @@
     <div class="fab-menu-item" data-action="pedido">
       <span>Nuevo pedido</span><span>📦</span>
     </div>
+    <div class="fab-menu-item" data-action="importar-pedido">
+      <span>Importar pedido</span><span>📥</span>
+    </div>
     <div class="fab-menu-item" data-action="movimiento">
       <span>Registrar gasto</span><span>💰</span>
     </div>
@@ -1665,6 +1668,7 @@ document.querySelectorAll('.fab-menu-item').forEach(item => {
     closeFab();
     const action = item.dataset.action;
     if (action === 'pedido')     openPedidoForm(null);
+    if (action === 'importar-pedido') openImportarPedidoModal();
     if (action === 'movimiento') openMovimientoForm();
     if (action === 'nota')       openNotaForm(null);
   });
@@ -1918,7 +1922,10 @@ function renderPedidos() {
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
       <div class="section-sub" style="margin-bottom:0">${state.pedidos.length} pedido${state.pedidos.length !== 1 ? 's' : ''} en total</div>
-      <button class="btn btn-primary btn-sm" onclick="openPedidoForm(null)">+ Nuevo</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-secondary btn-sm" onclick="openImportarPedidoModal()">📥 Importar</button>
+        <button class="btn btn-primary btn-sm" onclick="openPedidoForm(null)">+ Nuevo</button>
+      </div>
     </div>
 
     <div style="margin-top:10px">
@@ -2508,20 +2515,26 @@ function confirmEliminarProducto(nombre) {
 // Items temporales del pedido en edición
 let _pedidoItems = [];
 
-function openPedidoForm(id) {
+function openPedidoForm(id, datosImportados) {
   const p = id ? state.pedidos.find(x => x.id === id) : null;
-  const titulo = p ? 'Editar pedido' : 'Nuevo pedido';
-  // Cargar items existentes o empezar vacío
-  _pedidoItems = p?.items ? JSON.parse(JSON.stringify(p.items)) : [];
+  const titulo = p ? 'Editar pedido' : (datosImportados ? 'Nuevo pedido (importado — revisá antes de guardar)' : 'Nuevo pedido');
+  // Cargar items existentes, importados, o empezar vacío
+  _pedidoItems = p?.items ? JSON.parse(JSON.stringify(p.items))
+    : (datosImportados?.items ? JSON.parse(JSON.stringify(datosImportados.items)) : []);
+
+  const clienteInicial = p?.cliente || datosImportados?.cliente || '';
 
   openModal(`
     <div class="modal-title">${titulo}</div>
+    ${datosImportados ? `<div style="background:var(--surface2);border:1px solid var(--accent);border-radius:var(--radius-sm);padding:10px;margin-bottom:14px;font-size:12px;color:var(--text2)">
+      ⚠️ Este pedido se generó automáticamente a partir de un texto/foto. Los productos, cantidades y precios pueden tener errores — revisalos uno por uno antes de guardar.
+    </div>` : ''}
     <div class="form-group">
       <label class="form-label">Cliente *</label>
       <div class="cliente-wrap">
         <input class="form-input" id="f-cliente" type="text"
           placeholder="Nombre del cliente"
-          value="${p?.cliente||''}"
+          value="${clienteInicial}"
           autocomplete="off">
         <div class="cliente-dropdown" id="cliente-dropdown"></div>
       </div>
@@ -2531,7 +2544,7 @@ function openPedidoForm(id) {
       <label class="form-label">📱 Teléfono (WhatsApp)</label>
       <input class="form-input" id="f-telefono" type="tel"
         placeholder="Ej: 549341xxxxxxx (opcional)"
-        value="${p?.telefono || buscarTelefonoCliente(p?.cliente||'') || ''}"
+        value="${p?.telefono || datosImportados?.telefono || buscarTelefonoCliente(clienteInicial) || ''}"
         autocomplete="off">
     </div>
 
@@ -2591,7 +2604,7 @@ function openPedidoForm(id) {
     </div>
     <div class="form-group">
       <label class="form-label">Notas</label>
-      <textarea class="form-input" id="f-notas" placeholder="Detalles adicionales...">${p?.notas||''}</textarea>
+      <textarea class="form-input" id="f-notas" placeholder="Detalles adicionales...">${p?.notas || (datosImportados ? construirNotaImportacion(datosImportados) : '')}</textarea>
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
@@ -2622,7 +2635,7 @@ function renderItemsList() {
     let margenHtml = '';
     if (tieneReceta) {
       const costo = calcularCostoReceta(receta);
-      if (costo && costo.costoRealUnit > 0) {
+      if (costo && costo.costoRealUnit > 0 && item.precioUnit > 0) {
         const divisor = esItemPorcion ? (receta.porcionesPorUnidad || 1) : 1;
         const costoRealAjustado = costo.costoRealUnit / divisor;
         const margen = item.precioUnit - costoRealAjustado;
@@ -2631,6 +2644,8 @@ function renderItemsList() {
         margenHtml = `<div style="font-size:11px;margin-top:2px">
           <span style="color:${c.color};font-weight:600">Costo real: ${fmt(costoRealAjustado)} · Margen: ${margenPct.toFixed(0)}% (${c.label})</span>
         </div>`;
+      } else if (item.precioUnit === 0) {
+        margenHtml = `<div style="font-size:11px;margin-top:2px;color:var(--red);font-weight:600">⚠️ Falta precio — tocá ✕ y volvé a cargarlo</div>`;
       }
     }
     return `
@@ -2720,6 +2735,191 @@ function agregarItemPedido() {
 function quitarItemPedido(idx) {
   _pedidoItems.splice(idx, 1);
   renderItemsList();
+}
+
+/* ============================================================
+   IMPORTAR PEDIDO (texto pegado de WhatsApp o foto con OCR)
+   ------------------------------------------------------------
+   Flujo: el usuario pega el texto del mensaje o sube una captura
+   (que se convierte a texto con OCR corriendo en el navegador,
+   sin mandar la imagen a ningún servidor). Ese texto se separa en
+   "bloques" (un bloque = un pedido de un cliente) y cada bloque se
+   parsea de forma heurística (regex) en cliente + lista de productos
+   + total detectado. NO se inventan precios: cada producto queda
+   con precio $0 y cantidad 1 salvo que el texto diga claramente
+   "Nx" al principio de la línea, para que el usuario SIEMPRE revise
+   y complete antes de guardar el pedido.
+============================================================ */
+
+let _bloquesImportados = [];
+
+function openImportarPedidoModal() {
+  openModal(`
+    <div class="modal-title">📥 Importar pedido</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:12px">
+      Pegá el texto tal cual te lo mandó Sofía, o subí la captura de WhatsApp y la convertimos a texto automáticamente. Después vas a poder revisar cliente, productos y precios antes de guardar — nada se guarda solo.
+    </div>
+    <div class="form-group">
+      <label class="form-label">📷 Foto del pedido (opcional)</label>
+      <input class="form-input" id="f-import-file" type="file" accept="image/*" onchange="onImportImagenSeleccionada(event)">
+      <div id="import-ocr-status" style="font-size:12px;color:var(--accent);margin-top:6px;min-height:16px"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">📋 Texto del pedido</label>
+      <textarea class="form-input" id="f-import-texto" style="min-height:160px" placeholder="Pegá acá el mensaje de WhatsApp, o esperá a que la foto se convierta en texto..."></textarea>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Si tenés varios pedidos juntos (separados por guiones "----" o líneas en blanco), los detectamos por separado.</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="analizarTextoImportado()">🔍 Analizar</button>
+    </div>
+  `);
+}
+
+// Carga Tesseract.js (OCR) bajo demanda, solo si el usuario sube una foto.
+let _tesseractCargando = null;
+function cargarTesseract() {
+  if (window.Tesseract) return Promise.resolve();
+  if (_tesseractCargando) return _tesseractCargando;
+  _tesseractCargando = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    script.onload = () => resolve();
+    script.onerror = () => { _tesseractCargando = null; reject(new Error('No se pudo cargar el motor de OCR (revisá tu conexión)')); };
+    document.head.appendChild(script);
+  });
+  return _tesseractCargando;
+}
+
+async function onImportImagenSeleccionada(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const status = document.getElementById('import-ocr-status');
+  const textarea = document.getElementById('f-import-texto');
+  try {
+    if (status) status.textContent = '⏳ Cargando motor de reconocimiento de texto...';
+    await cargarTesseract();
+    if (status) status.textContent = '🔍 Leyendo la imagen, puede tardar unos segundos...';
+    const { data } = await Tesseract.recognize(file, 'spa', {
+      logger: m => {
+        if (status && m.status === 'recognizing text') {
+          status.textContent = `🔍 Leyendo la imagen... ${Math.round((m.progress || 0) * 100)}%`;
+        }
+      }
+    });
+    if (textarea) textarea.value = (data.text || '').trim();
+    if (status) status.textContent = '✅ Listo — revisá el texto extraído (el OCR a veces confunde algún caracter) y tocá "Analizar"';
+  } catch (e) {
+    console.error('[Importar] Error de OCR', e);
+    if (status) status.textContent = '⚠️ ' + (e.message || 'Error leyendo la imagen. Probá pegando el texto manualmente.');
+  }
+}
+
+// Separa el texto pegado en bloques (uno por pedido/cliente), cortando por
+// líneas de guiones ("----...") o por líneas en blanco dobles.
+function splitBloquesPedido(texto) {
+  return texto
+    .split(/\n[ \t]*-{3,}[ \t]*\n|\n{2,}/)
+    .map(b => b.trim())
+    .filter(b => b.length > 0);
+}
+
+// Parsea UN bloque de texto (un pedido) en { cliente, notaCliente, telefono, items, totalDetectado }
+function parseBloquePedido(bloque) {
+  const lineas = bloque.split('\n').map(l => l.trim()).filter(l => l && !/^-{3,}$/.test(l));
+  if (lineas.length === 0) return null;
+
+  // Cliente = primera línea; si tiene "(algo)" lo separamos como nota aparte
+  const lineaCliente = lineas[0];
+  const matchParen = lineaCliente.match(/^(.*?)\s*\(/);
+  const cliente = (matchParen ? matchParen[1] : lineaCliente).trim();
+  const notaCliente = lineaCliente.includes('(') ? lineaCliente.slice(lineaCliente.indexOf('(')) : '';
+  if (!cliente) return null;
+
+  // Teléfono: primera secuencia de 8+ dígitos que aparezca en el bloque (opcional)
+  let telefono = '';
+  for (const l of lineas) {
+    const m = l.match(/\b(\d[\d\s-]{7,14}\d)\b/);
+    if (m) { telefono = m[1].replace(/[\s-]/g, ''); break; }
+  }
+
+  // Total: última línea que sea solamente un precio tipo "$28.000"
+  let totalDetectado = null;
+  let idxTotal = -1;
+  for (let i = lineas.length - 1; i >= 1; i--) {
+    if (/^\$\s?[\d.,]+\.?$/.test(lineas[i])) {
+      totalDetectado = parsePrecio(lineas[i].replace('$', ''));
+      idxTotal = i;
+      break;
+    }
+  }
+
+  // Líneas de producto: todo lo que hay entre el cliente y el total
+  const finItems = idxTotal >= 0 ? idxTotal : lineas.length;
+  const lineasProducto = lineas.slice(1, finItems);
+
+  const items = lineasProducto.map(l => {
+    // Solo tomamos una cantidad numérica automática cuando el patrón es claro: "2x algo"
+    const mCant = l.match(/^(\d+)\s*[xX]\s*/);
+    let cantidad = 1;
+    let producto = l;
+    if (mCant) {
+      cantidad = parseInt(mCant[1], 10) || 1;
+      producto = l.slice(mCant[0].length).trim();
+    }
+    return { producto, cantidad, precioUnit: 0, subtotal: 0 };
+  }).filter(it => it.producto);
+
+  return { cliente, notaCliente, telefono, items, totalDetectado };
+}
+
+// Arma el texto que se agrega a "Notas" cuando el pedido viene de una importación,
+// para no perder el contexto original (total del mensaje, aclaraciones del cliente, etc).
+function construirNotaImportacion(bloque) {
+  let nota = '📥 Importado automáticamente.';
+  if (bloque.notaCliente) nota += ` ${bloque.notaCliente}.`;
+  if (bloque.totalDetectado) nota += ` Total en el mensaje original: $${bloque.totalDetectado.toLocaleString('es-AR')}.`;
+  nota += ' Revisá cantidades y precios de cada producto antes de confiar en el total.';
+  return nota;
+}
+
+function analizarTextoImportado() {
+  const texto = document.getElementById('f-import-texto')?.value || '';
+  if (!texto.trim()) { showToast('⚠️ Pegá el texto o subí la foto del pedido primero'); return; }
+
+  const bloques = splitBloquesPedido(texto).map(parseBloquePedido).filter(b => b && b.cliente);
+  if (bloques.length === 0) { showToast('⚠️ No pude identificar ningún pedido en ese texto — probá pegándolo manualmente en "Nuevo pedido"'); return; }
+
+  if (bloques.length === 1) {
+    openPedidoForm(null, bloques[0]);
+  } else {
+    _bloquesImportados = bloques;
+    mostrarSelectorBloquesImportados(bloques);
+  }
+}
+
+function mostrarSelectorBloquesImportados(bloques) {
+  openModal(`
+    <div class="modal-title">Se detectaron ${bloques.length} pedidos</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Elegí cuál cargar primero. Los demás quedan disponibles — tocá "📥 Importar" de nuevo y pegá el mismo texto para cargar el siguiente.</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${bloques.map((b, idx) => `
+        <button class="btn btn-secondary w-100" style="text-align:left;padding:10px 14px" onclick="abrirPedidoDesdeImportacionIdx(${idx})">
+          <div style="font-weight:700">${b.cliente}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">${b.items.length} producto${b.items.length !== 1 ? 's' : ''}${b.totalDetectado ? ' · $' + b.totalDetectado.toLocaleString('es-AR') : ''}</div>
+        </button>
+      `).join('')}
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+    </div>
+  `);
+}
+
+function abrirPedidoDesdeImportacionIdx(idx) {
+  const bloque = _bloquesImportados[idx];
+  if (!bloque) return;
+  openPedidoForm(null, bloque);
 }
 
 // Normaliza texto para comparar sin tildes ni mayúsculas (usado por todos los autocompletados)
@@ -3054,6 +3254,21 @@ function savePedido(id) {
   if (!cliente || !fecha) { showToast('⚠️ Completá cliente y fecha'); return; }
   if (_pedidoItems.length === 0) { showToast('⚠️ Agregá al menos un producto'); return; }
 
+  const sinPrecio = _pedidoItems.filter(i => !i.precioUnit || i.precioUnit <= 0);
+  if (sinPrecio.length > 0) {
+    showConfirm(
+      '⚠️ Hay productos sin precio',
+      `${sinPrecio.length} producto${sinPrecio.length !== 1 ? 's' : ''} quedaron con precio $0 (típico de un pedido importado). ¿Guardar igual?`,
+      () => savePedidoConfirmado(id)
+    );
+    return;
+  }
+  savePedidoConfirmado(id);
+}
+
+function savePedidoConfirmado(id) {
+  const cliente = document.getElementById('f-cliente').value.trim();
+  const fecha = document.getElementById('f-fecha').value;
   const precio = _pedidoItems.reduce((s, i) => s + i.subtotal, 0);
   // Resumen de productos para mostrar en la lista
   const producto = _pedidoItems.map(i => `${i.cantidad}x ${i.producto}`).join(', ');

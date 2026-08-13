@@ -1970,7 +1970,7 @@ document.querySelectorAll('.fab-menu-item').forEach(item => {
   item.addEventListener('click', () => {
     closeFab();
     const action = item.dataset.action;
-    if (action === 'pedido')     openPedidoForm(null);
+    if (action === 'pedido')     { _bloqueImportadoIdxActual = null; openPedidoForm(null); }
     if (action === 'importar-pedido') openImportarPedidoModal();
     if (action === 'movimiento') openMovimientoForm();
     if (action === 'nota')       openNotaForm(null);
@@ -2227,7 +2227,7 @@ function renderPedidos() {
       <div class="section-sub" style="margin-bottom:0">${state.pedidos.length} pedido${state.pedidos.length !== 1 ? 's' : ''} en total</div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-secondary btn-sm" onclick="openImportarPedidoModal()">📥 Importar</button>
-        <button class="btn btn-primary btn-sm" onclick="openPedidoForm(null)">+ Nuevo</button>
+        <button class="btn btn-primary btn-sm" onclick="_bloqueImportadoIdxActual=null;openPedidoForm(null)">+ Nuevo</button>
       </div>
     </div>
 
@@ -2444,7 +2444,7 @@ function openPedidoDetalle(id) {
       ${p.estado !== 'done' ? `<button class="btn btn-primary btn-sm" onclick="marcarEntregado(${p.id})">✓ Marcar entregado</button>` : ''}
       ${!estaPagadoCompleto(p) ? `<button class="btn btn-secondary btn-sm" onclick="openRegistrarPago(${p.id})">💰 Registrar pago</button>` : ''}
       <button class="btn btn-ghost btn-sm" onclick="compartirPedidoWhatsApp(${p.id})">📱 Compartir por WhatsApp</button>
-      <button class="btn btn-ghost btn-sm" onclick="openPedidoForm(${p.id})">✏️ Editar</button>
+      <button class="btn btn-ghost btn-sm" onclick="_bloqueImportadoIdxActual=null;openPedidoForm(${p.id})">✏️ Editar</button>
       <button class="btn btn-danger btn-sm" onclick="confirmEliminarPedido(${p.id})">🗑 Eliminar</button>
     </div>
   `);
@@ -2970,7 +2970,7 @@ function openPedidoForm(id, datosImportados) {
       <textarea class="form-input" id="f-notas" placeholder="Detalles adicionales...">${p?.notas || (datosImportados ? construirNotaImportacion(datosImportados) : '')}</textarea>
     </div>
     <div class="modal-actions">
-      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-ghost w-100" onclick="${datosImportados ? 'cancelarPedidoFormImportado()' : 'closeModal()'}">Cancelar</button>
       <button class="btn btn-primary w-100" onclick="savePedido(${id||'null'})">💾 Guardar</button>
     </div>
   `);
@@ -3016,12 +3016,24 @@ function aplicarClienteSugerido() {
 }
 
 // Aplica la sugerencia de producto del catálogo para el ítem importado en la
-// posición idx (ej: "media con dulce" → "Media docena churros DDL").
+// posición idx (ej: "media con dulce" → "Media docena churros DDL"). Si el
+// ítem todavía no tiene precio cargado (típico de un pedido importado con
+// varios productos, que quedan en $0), se completa automáticamente con el
+// precio que ese producto tiene en el catálogo de la app, para no dejar el
+// nombre "corregido" pero el precio en $0.
 function aplicarProductoSugerido(idx) {
   const item = _pedidoItems[idx];
   if (!item || !item.productoSugerido) return;
   item.producto = item.productoSugerido;
   delete item.productoSugerido;
+  if (!item.precioUnit || item.precioUnit <= 0) {
+    const catItem = getCatalogo().find(p => p.nombre.toLowerCase() === item.producto.toLowerCase());
+    if (catItem && catItem.precio > 0) {
+      item.precioUnit = catItem.precio;
+      item.subtotal = item.cantidad * catItem.precio;
+      showToast(`💲 Precio completado desde el catálogo: $${catItem.precio.toLocaleString('es-AR')} c/u`);
+    }
+  }
   renderItemsList();
 }
 
@@ -3175,6 +3187,10 @@ function quitarItemPedido(idx) {
 ============================================================ */
 
 let _bloquesImportados = [];
+// Índice (dentro de _bloquesImportados) del pedido que se está confirmando
+// ahora mismo en el formulario, cuando se abrió desde el selector de "varios
+// pedidos detectados". null = el formulario no viene de ese selector.
+let _bloqueImportadoIdxActual = null;
 
 function openImportarPedidoModal() {
   openModal(`
@@ -3558,6 +3574,7 @@ function analizarTextoImportado() {
   });
 
   if (pedidos.length === 1) {
+    _bloqueImportadoIdxActual = null;
     openPedidoForm(null, pedidos[0]);
   } else {
     _bloquesImportados = pedidos;
@@ -3567,8 +3584,8 @@ function analizarTextoImportado() {
 
 function mostrarSelectorBloquesImportados(bloques) {
   openModal(`
-    <div class="modal-title">Se detectaron ${bloques.length} pedidos</div>
-    <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Elegí cuál cargar primero. Los demás quedan disponibles — tocá "📥 Importar" de nuevo y pegá el mismo texto para cargar el siguiente.</div>
+    <div class="modal-title">Se detectaron ${bloques.length} pedido${bloques.length !== 1 ? 's' : ''}</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Elegí cuál cargar. Después de guardarlo volvés acá automáticamente para seguir con los demás.</div>
     <div style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto">
       ${bloques.map((b, idx) => `
         <button class="btn btn-secondary w-100" style="text-align:left;padding:10px 14px" onclick="abrirPedidoDesdeImportacionIdx(${idx})">
@@ -3586,7 +3603,36 @@ function mostrarSelectorBloquesImportados(bloques) {
 function abrirPedidoDesdeImportacionIdx(idx) {
   const bloque = _bloquesImportados[idx];
   if (!bloque) return;
+  _bloqueImportadoIdxActual = idx;
   openPedidoForm(null, bloque);
+}
+
+// Se llama al tocar "Cancelar" en el formulario de un pedido que se abrió
+// desde el selector de "varios pedidos detectados": en vez de perder los
+// demás pedidos pendientes, vuelve a mostrar ese selector (este pedido en
+// particular NO se descarta de la lista, por si Sofía quiere volver a él).
+function cancelarPedidoFormImportado() {
+  closeModal();
+  const habiaSelector = _bloqueImportadoIdxActual !== null && _bloquesImportados.length > 0;
+  _bloqueImportadoIdxActual = null;
+  if (habiaSelector) {
+    setTimeout(() => mostrarSelectorBloquesImportados(_bloquesImportados), 50);
+  }
+}
+
+// Se llama después de guardar con éxito un pedido que se abrió desde el
+// selector de "varios pedidos detectados": lo saca de la lista y, si quedan
+// más pedidos por revisar, vuelve a abrir el selector automáticamente para
+// que Sofía siga cargando el resto sin tener que volver a pegar el texto.
+function continuarFlujoImportacionTrasGuardar() {
+  if (_bloqueImportadoIdxActual === null) return;
+  _bloquesImportados.splice(_bloqueImportadoIdxActual, 1);
+  _bloqueImportadoIdxActual = null;
+  if (_bloquesImportados.length > 0) {
+    setTimeout(() => mostrarSelectorBloquesImportados(_bloquesImportados), 400);
+  } else {
+    setTimeout(() => showToast('✅ Ya cargaste todos los pedidos detectados'), 400);
+  }
 }
 
 // Normaliza texto para comparar sin tildes ni mayúsculas (usado por todos los autocompletados)
@@ -4085,6 +4131,7 @@ function savePedidoConfirmado(id) {
   // (no bloqueante) después de guardar, en vez de interrumpir con un modal.
   const advertenciasStock = verificarStockSuficiente(_pedidoItems);
   procederGuardado();
+  continuarFlujoImportacionTrasGuardar();
   if (advertenciasStock.length > 0) {
     const detalle = advertenciasStock.map(a => `${a.ingrediente}: faltan ${a.faltante} ${a.unidad}`).join(' · ');
     setTimeout(() => showToast(`⚠️ Stock insuficiente — ${detalle}`), 1600);

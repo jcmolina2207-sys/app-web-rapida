@@ -2147,24 +2147,32 @@ function openPedidoDetalle(id) {
   `);
 }
 
+// Genera (si corresponde) el ingreso automático en Finanzas para un pedido
+// en estado "Entregado". Se usa tanto al tocar "✓ Marcar entregado" como al
+// guardar un pedido desde el formulario cuando el estado ya se elige como
+// "Entregado" directamente (ej. al cargar pedidos viejos que ya se cobraron).
+// No duplica: si ya existe un movimiento auto ligado a ese pedido, no hace nada.
+function generarIngresoAutoSiEntregado(p) {
+  if (!p || p.estado !== 'done') return null;
+  const yaExiste = state.movimientos.some(m => m.auto && m.pedidoId === p.id);
+  if (yaExiste) return null;
+  const nuevoMov = {
+    id: nextId(), tipo: 'income',
+    descripcion: `${p.producto} - ${p.cliente}`,
+    monto: p.precio, fecha: p.fechaEntrega, auto: true,
+    pedidoId: p.id
+  };
+  state.movimientos.unshift(nuevoMov);
+  persistItem('movimientos', nuevoMov);
+  return nuevoMov;
+}
+
 function marcarEntregado(id, fromDash) {
   const p = state.pedidos.find(x => x.id === id);
   if (!p || p.estado === 'done') return;
   p.estado = 'done';
-  // auto-ingreso
-  const yaExiste = state.movimientos.some(m => m.auto && m.pedidoId === p.id);
-  let nuevoMov = null;
-  if (!yaExiste) {
-    nuevoMov = {
-      id: nextId(), tipo: 'income',
-      descripcion: `${p.producto} - ${p.cliente}`,
-      monto: p.precio, fecha: p.fechaEntrega, auto: true,
-      pedidoId: p.id
-    };
-    state.movimientos.unshift(nuevoMov);
-  }
+  const nuevoMov = generarIngresoAutoSiEntregado(p);
   persistItem('pedidos', p);
-  if (nuevoMov) persistItem('movimientos', nuevoMov);
   saveState();
   closeModal();
   showToast('✅ Pedido entregado · Ingreso registrado');
@@ -2536,12 +2544,18 @@ function confirmEliminarProducto(nombre) {
 // Items temporales del pedido en edición
 let _pedidoItems = [];
 
+// Nombre de cliente sugerido para el pedido que se está editando actualmente
+// (viene de sugerirClienteExistente() al importar). Se guarda acá para que el
+// botón "Tocá para usarlo" no tenga que embeber el nombre en el onclick.
+let _pedidoClienteSugeridoActual = null;
+
 function openPedidoForm(id, datosImportados) {
   const p = id ? state.pedidos.find(x => x.id === id) : null;
   const titulo = p ? 'Editar pedido' : (datosImportados ? 'Nuevo pedido (importado — revisá antes de guardar)' : 'Nuevo pedido');
   // Cargar items existentes, importados, o empezar vacío
   _pedidoItems = p?.items ? JSON.parse(JSON.stringify(p.items))
     : (datosImportados?.items ? JSON.parse(JSON.stringify(datosImportados.items)) : []);
+  _pedidoClienteSugeridoActual = datosImportados?.clienteSugerido || null;
 
   const clienteInicial = p?.cliente || datosImportados?.cliente || '';
 
@@ -2559,6 +2573,12 @@ function openPedidoForm(id, datosImportados) {
           autocomplete="off">
         <div class="cliente-dropdown" id="cliente-dropdown"></div>
       </div>
+      ${datosImportados?.clienteSugerido ? `
+      <div id="cliente-sugerido-chip" style="margin-top:6px">
+        <button type="button" class="btn btn-secondary btn-sm" onclick="aplicarClienteSugerido()" style="font-size:12px">
+          💡 ¿Es "${datosImportados.clienteSugerido.replace(/"/g, '&quot;')}"? Tocá para usarlo
+        </button>
+      </div>` : ''}
     </div>
 
     <div class="form-group">
@@ -2662,6 +2682,31 @@ function togglePagadoCompletoForm() {
   }
 }
 
+// Aplica la sugerencia de cliente (ej: "Miriam" → "Miriam almacén 126") cuando
+// Sofía toca el chip "¿Es...? Tocá para usarlo" — nunca se aplica sola.
+function aplicarClienteSugerido() {
+  if (!_pedidoClienteSugeridoActual) return;
+  const input = document.getElementById('f-cliente');
+  if (input) input.value = _pedidoClienteSugeridoActual;
+  const telInput = document.getElementById('f-telefono');
+  if (telInput && !telInput.value.trim()) {
+    const tel = buscarTelefonoCliente(_pedidoClienteSugeridoActual);
+    if (tel) telInput.value = tel;
+  }
+  const chip = document.getElementById('cliente-sugerido-chip');
+  if (chip) chip.remove();
+}
+
+// Aplica la sugerencia de producto del catálogo para el ítem importado en la
+// posición idx (ej: "media con dulce" → "Media docena churros DDL").
+function aplicarProductoSugerido(idx) {
+  const item = _pedidoItems[idx];
+  if (!item || !item.productoSugerido) return;
+  item.producto = item.productoSugerido;
+  delete item.productoSugerido;
+  renderItemsList();
+}
+
 function renderItemsList() {
   const el = document.getElementById('items-list');
   if (!el) return;
@@ -2686,18 +2731,25 @@ function renderItemsList() {
         const margenPct = (margen / item.precioUnit) * 100;
         const c = margenColor({ margenPct });
         margenHtml = `<div style="font-size:11px;margin-top:2px">
-          <span style="color:${c.color};font-weight:600">Costo real: ${fmt(costoRealAjustado)} · Margen: ${margenPct.toFixed(0)}% (${c.label})</span>
+          <span style="color:${c.color};font-weight:600">Costo materia prima: ${fmt(costoRealAjustado)} · Ganancia: ${margenPct.toFixed(0)}% (${c.label})</span>
         </div>`;
       } else if (item.precioUnit === 0) {
         margenHtml = `<div style="font-size:11px;margin-top:2px;color:var(--red);font-weight:600">⚠️ Falta precio — tocá ✕ y volvé a cargarlo</div>`;
       }
     }
+    const sugerenciaHtml = item.productoSugerido ? `
+      <div style="margin-top:4px">
+        <button type="button" class="btn btn-secondary btn-sm" onclick="aplicarProductoSugerido(${idx})" style="font-size:11px;padding:4px 8px">
+          💡 ¿Es "${item.productoSugerido.replace(/"/g, '&quot;')}"? Tocá para usarlo
+        </button>
+      </div>` : '';
     return `
     <div class="item-row">
       <div class="item-row-info">
         <div class="item-row-name">${item.producto} ${tieneReceta ? '<span title="Tiene receta — descontará stock" style="font-size:11px;color:var(--accent)">📋</span>' : ''}</div>
         <div class="item-row-detail">x${item.cantidad} · $${item.precioUnit} c/u${tieneReceta ? ' · <span style="color:var(--accent);font-size:11px">descuenta stock</span>' : ''}</div>
         ${margenHtml}
+        ${sugerenciaHtml}
       </div>
       <div class="item-row-price">$${item.subtotal.toLocaleString('es-AR')}</div>
       <button class="item-row-del" onclick="quitarItemPedido(${idx})">✕</button>
@@ -3063,6 +3115,97 @@ function limpiarPedidosImportados(pedidos) {
   return resultado;
 }
 
+// Detecta presentación (docena / media docena / unidad) y sabor a partir del
+// texto libre de un producto parseado, usando las abreviaturas típicas que usa
+// Sofía en los mensajes de agenda ("1/2 docena rellena", "media con dulce", etc).
+function detectarSaborYPresentacion(desc) {
+  const d = desc || '';
+  let unidad = null;
+  // "media" sola (sin la palabra "docena" al lado) también cuenta — Sofía suele
+  // abreviarlo así, ej: "Miriam media con dulce $4.000"
+  if (/\b(1\/2|media)\b/i.test(d)) unidad = 'media docena';
+  else if (/\bdocena\b/i.test(d)) unidad = 'docena';
+  else if (/\b(unidad(es)?|c\/u|suelto)\b/i.test(d)) unidad = 'unidad';
+
+  let sabor = null;
+  // Combinado (chocolate + DDL) primero, para no confundirlo con uno de los dos solos.
+  // "CH" es la abreviatura que usa Sofía para chocolate (ej: "DDL + CH")
+  if (/((choco(late)?|\bch\b)[^a-z]{0,15}(ddl|dulce|relleno|rellena)|(ddl|dulce|relleno|rellena)[^a-z]{0,15}(choco(late)?|\bch\b)|\bmixt[oa]s?\b|\bcombinad[oa]s?\b)/i.test(d)) {
+    sabor = 'chocolate + DDL';
+  } else if (/\bchoco(late)?\b|\bch\b/i.test(d)) {
+    sabor = 'chocolate';
+  } else if (/\b(ddl|dulce de leche|con dulce|rellenos?|rellenas?)\b/i.test(d)) {
+    // "relleno/a" sin aclarar (ni chocolate ni "dulce" explícito) se asume DDL por defecto
+    sabor = 'DDL';
+  } else if (/\bsimples?\b/i.test(d)) {
+    sabor = 'simple';
+  }
+
+  return { unidad, sabor };
+}
+
+// Detecta la familia de producto (churro, alfajor, torta, pan) a partir de
+// palabras explícitas en el texto. Si no hay ninguna palabra de familia pero sí
+// se detectó sabor/presentación típica de churros, se asume "churro" (es el
+// producto más frecuente en los mensajes de agenda de Sofía).
+function detectarFamiliaProducto(desc, sabor, unidad) {
+  const d = desc || '';
+  if (/\bchurros?\b/i.test(d)) return 'churro';
+  if (/\balfajor(es)?\b/i.test(d)) return 'alfajor';
+  if (/\b(torta|tarta|pastafrola|bizcochuelo|lemon\s*pie|brownie)\b/i.test(d)) return 'torta';
+  if (/\b(pepas?|bizcochitos?|pan)\b/i.test(d)) return 'pan';
+  if (sabor && (unidad === 'docena' || unidad === 'media docena')) return 'churro';
+  return null;
+}
+
+// Compara la descripción de un producto recién parseado (ej: "media con dulce")
+// contra el catálogo YA cargado (getCatalogo()) para sugerir el producto exacto
+// (ej: "Media docena churros DDL"). Solo sugiere cuando, tras filtrar por familia
+// + presentación + sabor, queda UN único candidato — si es ambiguo, no arriesga
+// nada y deja el texto tal cual se parseó para que Sofía lo complete a mano.
+function sugerirProductoCatalogo(descripcionParseada) {
+  const desc = (descripcionParseada || '').trim();
+  if (!desc) return null;
+
+  const { unidad, sabor } = detectarSaborYPresentacion(desc);
+  const familia = detectarFamiliaProducto(desc, sabor, unidad);
+  if (!familia) return null;
+
+  const catalogo = getCatalogo();
+  let candidatos = catalogo.filter(p => {
+    const n = normalizarTexto(p.nombre);
+    if (familia === 'churro') return n.includes('churro');
+    if (familia === 'alfajor') return n.includes('alfajor');
+    if (familia === 'torta') return /torta|tarta|pastafrola|bizcochuelo|lemon pie|brownie/.test(n);
+    if (familia === 'pan') return /pepa|bizcochito|pan\b/.test(n);
+    return false;
+  });
+
+  if (familia === 'churro') {
+    if (unidad) {
+      candidatos = candidatos.filter(p => {
+        const n = normalizarTexto(p.nombre);
+        if (unidad === 'media docena') return n.includes('media docena');
+        if (unidad === 'docena') return n.includes('docena') && !n.includes('media docena');
+        if (unidad === 'unidad') return !n.includes('docena');
+        return true;
+      });
+    }
+    if (sabor) {
+      candidatos = candidatos.filter(p => {
+        const n = normalizarTexto(p.nombre);
+        if (sabor === 'simple') return n.includes('simple');
+        if (sabor === 'DDL') return n.includes('ddl') && !n.includes('chocolate');
+        if (sabor === 'chocolate') return n.includes('chocolate') && !n.includes('ddl');
+        if (sabor === 'chocolate + DDL') return n.includes('chocolate') && n.includes('ddl');
+        return true;
+      });
+    }
+  }
+
+  return candidatos.length === 1 ? candidatos[0].nombre : null;
+}
+
 // Arma el texto que se agrega a "Notas" cuando el pedido viene de una importación,
 // para no perder el contexto original (total del mensaje, aclaraciones del cliente, etc).
 function construirNotaImportacion(bloque) {
@@ -3083,6 +3226,18 @@ function analizarTextoImportado() {
   pedidos = limpiarPedidosImportados(pedidos);
 
   if (pedidos.length === 0) { showToast('⚠️ No pude identificar ningún pedido en ese texto — probá pegándolo manualmente en "Nuevo pedido"'); return; }
+
+  // Buscar coincidencias con clientes y productos ya cargados en la app —
+  // se guardan como SUGERENCIA (nunca se pisa el texto original solo) para
+  // que Sofía las confirme con un toque en el formulario.
+  pedidos.forEach(p => {
+    const clienteSug = sugerirClienteExistente(p.cliente);
+    if (clienteSug) p.clienteSugerido = clienteSug;
+    p.items.forEach(it => {
+      const prodSug = sugerirProductoCatalogo(it.producto);
+      if (prodSug && normalizarTexto(prodSug) !== normalizarTexto(it.producto)) it.productoSugerido = prodSug;
+    });
+  });
 
   if (pedidos.length === 1) {
     openPedidoForm(null, pedidos[0]);
@@ -3256,14 +3411,19 @@ function crearAutocomplete(cfg) {
   }
 }
 
+// Nombres de clientes ya cargados (a partir de pedidos existentes), sin duplicados
+// ni ordenar. Función compartida: la usan el autocompletado y el matcher de importación.
+function getNombresClientesUnicos() {
+  return [...new Set(state.pedidos.map(p => (p.cliente || '').trim()).filter(Boolean))];
+}
+
 function initClienteAutocomplete() {
   const input = document.getElementById('f-cliente');
   const dropdown = document.getElementById('cliente-dropdown');
   if (!input || !dropdown) return;
 
   function getClienteNames() {
-    const nombres = [...new Set(state.pedidos.map(p => p.cliente.trim()).filter(Boolean))];
-    return nombres.sort();
+    return getNombresClientesUnicos().sort();
   }
 
   crearAutocomplete({
@@ -3321,6 +3481,41 @@ function buscarTelefonoCliente(nombre) {
     .filter(p => normalizarTexto((p.cliente||'').trim()) === norm && p.telefono)
     .sort((a, b) => (b.fechaEntrega||'').localeCompare(a.fechaEntrega||''));
   return pedidosCliente.length > 0 ? pedidosCliente[0].telefono : '';
+}
+
+// Compara un nombre "crudo" recién parseado de un pedido importado (ej: "Miriam",
+// tomado de un mensaje que dice solo eso) contra los clientes YA cargados en la
+// app, para detectar que en realidad es el mismo cliente que "Miriam almacén 126".
+// Nunca autocompleta solo: siempre vuelve como sugerencia para que Sofía la
+// confirme con un toque (así no se le pisa el nombre a un cliente por error).
+function sugerirClienteExistente(nombreParseado) {
+  const nombre = (nombreParseado || '').trim();
+  if (!nombre) return null;
+  // Nombres muy cortos (menos de 3 letras) no dan pistas confiables — evitamos falsos positivos
+  if (nombre.replace(/[^a-zA-ZÀ-ÿ]/g, '').length < 3) return null;
+
+  const normParseado = normalizarTexto(nombre);
+  const existentes = getNombresClientesUnicos();
+
+  // Ya es exactamente un cliente existente → no hace falta sugerir nada
+  if (existentes.some(n => normalizarTexto(n) === normParseado)) return null;
+
+  const wordsParseado = normParseado.split(/\s+/).filter(Boolean);
+
+  const candidatos = existentes.filter(n => {
+    const normExistente = normalizarTexto(n);
+    const wordsExistente = normExistente.split(/\s+/).filter(Boolean);
+    // El nombre parseado está "contenido" en el existente (ej: "Miriam" dentro de
+    // "Miriam almacén 126"), o al revés (el existente es más corto/genérico)
+    const parseadoEnExistente = wordsParseado.every(w => normExistente.includes(w));
+    const existenteEnParseado = wordsExistente.every(w => normParseado.includes(w));
+    return parseadoEnExistente || existenteEnParseado;
+  });
+
+  // Si matchea un solo cliente existente es una sugerencia confiable. Si matchea
+  // más de uno (dos "Miriam" distintas, por ej.) es ambiguo — mejor no sugerir
+  // nada y dejar que Sofía lo revise/escriba a mano.
+  return candidatos.length === 1 ? candidatos[0] : null;
 }
 
 function initProductoAutocomplete() {
@@ -3466,12 +3661,15 @@ function savePedidoConfirmado(id) {
   const precio = _pedidoItems.reduce((s, i) => s + i.subtotal, 0);
   // Resumen de productos para mostrar en la lista
   const producto = _pedidoItems.map(i => `${i.cantidad}x ${i.producto}`).join(', ');
+  // Limpiar propiedades temporales (ej. productoSugerido de una sugerencia no
+  // confirmada) que no deben guardarse en Firestore junto con el ítem
+  const itemsLimpios = _pedidoItems.map(({ producto, cantidad, precioUnit, subtotal }) => ({ producto, cantidad, precioUnit, subtotal }));
 
   const data = {
     cliente,
     telefono: document.getElementById('f-telefono').value.trim(),
     producto,
-    items: _pedidoItems,
+    items: itemsLimpios,
     cantidad: _pedidoItems.reduce((s, i) => s + i.cantidad, 0),
     precio,
     fechaEntrega: fecha,
@@ -3491,9 +3689,12 @@ function savePedidoConfirmado(id) {
       const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
       persistIngredientesDeItems([...itemsAnteriores, ..._pedidoItems]);
       state.pedidos[idx] = { ...state.pedidos[idx], ...data };
+      const ingresoAuto = generarIngresoAutoSiEntregado(state.pedidos[idx]);
       persistItem('pedidos', state.pedidos[idx]);
       saveState(); closeModal();
-      if (descuentos.length > 0) {
+      if (ingresoAuto) {
+        showToast('✏️ Pedido actualizado · 💰 Ingreso registrado en Finanzas');
+      } else if (descuentos.length > 0) {
         showToast('✏️ Pedido actualizado · 🧂 stock ajustado');
       } else {
         showToast('✏️ Pedido actualizado');
@@ -3504,9 +3705,12 @@ function savePedidoConfirmado(id) {
       // Descontar materia prima según recetas
       const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
       persistIngredientesDeItems(_pedidoItems);
+      const ingresoAuto = generarIngresoAutoSiEntregado(nuevoPedido);
       persistItem('pedidos', nuevoPedido);
       saveState(); closeModal();
-      if (descuentos.length > 0) {
+      if (ingresoAuto) {
+        showToast('📦 Pedido creado · 💰 Ingreso registrado en Finanzas');
+      } else if (descuentos.length > 0) {
         showToast('📦 Pedido creado · 🧂 ' + descuentos.slice(0, 3).join(', ') + (descuentos.length > 3 ? ' y más...' : ''));
       } else {
         showToast('📦 Pedido creado');
@@ -3519,17 +3723,15 @@ function savePedidoConfirmado(id) {
     }
   };
 
-  // Avisar si no alcanza el stock de materia prima, sin bloquear el guardado
+  // El pedido se guarda siempre, tenga o no stock/ingredientes cargados —
+  // es normal que Sofía cargue la materia prima más adelante. Si falta
+  // stock para algún ingrediente ya registrado, sólo se avisa con un toast
+  // (no bloqueante) después de guardar, en vez de interrumpir con un modal.
   const advertenciasStock = verificarStockSuficiente(_pedidoItems);
+  procederGuardado();
   if (advertenciasStock.length > 0) {
     const detalle = advertenciasStock.map(a => `${a.ingrediente}: faltan ${a.faltante} ${a.unidad}`).join(' · ');
-    showConfirm(
-      '⚠️ Stock insuficiente',
-      `No alcanza la materia prima para este pedido — ${detalle}. ¿Guardar igual?`,
-      procederGuardado
-    );
-  } else {
-    procederGuardado();
+    setTimeout(() => showToast(`⚠️ Stock insuficiente — ${detalle}`), 1600);
   }
 }
 
@@ -4476,7 +4678,12 @@ function costoFijoPorHoraProductiva() {
   return totalMensual / horas;
 }
 
-// Desglose de costo real de una receta, por unidad de venta
+// Desglose de costo real de una receta, por unidad de venta.
+// Por ahora sólo considera materia prima (+ ajuste por merma): todavía no
+// tenemos el tiempo real de cada receta cargado, así que mano de obra, gas
+// y gastos fijos quedan fuera del cálculo hasta que se pueda medir bien.
+// (costoGasPorMinuto / costoFijoPorHoraProductiva quedan definidas más abajo
+// para cuando se retome ese cálculo más adelante.)
 function calcularCostoReceta(receta) {
   if (!receta || !receta.rinde) return null;
 
@@ -4487,21 +4694,13 @@ function calcularCostoReceta(receta) {
   });
   const materiaPrimaUnit = costoMP / receta.rinde;
 
-  const horasReceta = (receta.tiempoMinutos || 0) / 60;
-  const manoObraUnit = (horasReceta * (state.config.valorHora || 0)) / receta.rinde;
-
-  const minutosHorno = receta.minutosHorno || 0;
-  const gasUnit = (minutosHorno * costoGasPorMinuto()) / receta.rinde;
-
-  const gastosFijosUnit = (horasReceta * costoFijoPorHoraProductiva()) / receta.rinde;
-
-  const subtotalUnit = materiaPrimaUnit + manoObraUnit + gasUnit + gastosFijosUnit;
+  const subtotalUnit = materiaPrimaUnit;
   const mermaPct = receta.mermaPct || 0;
   const factorMerma = mermaPct > 0 ? 1 / (1 - mermaPct / 100) : 1;
   const costoRealUnit = subtotalUnit * factorMerma;
 
   return {
-    materiaPrimaUnit, manoObraUnit, gasUnit, gastosFijosUnit,
+    materiaPrimaUnit,
     subtotalUnit, factorMerma, costoRealUnit,
   };
 }
@@ -4568,7 +4767,6 @@ function datosFaltantesReceta(receta) {
   const faltan = [];
   if (!receta.rinde) faltan.push('rinde de la receta');
   if (!receta.ingredientes || receta.ingredientes.length === 0) faltan.push('ingredientes cargados');
-  if (!receta.tiempoMinutos) faltan.push('tiempo de preparación');
   return faltan;
 }
 
@@ -4612,16 +4810,14 @@ function openMargenRecetaModal(nombreProducto) {
     ${avisoFaltantes}
     <div class="detail-row"><span class="label">Precio de venta</span><span class="value">${m.precioVenta ? fmt(m.precioVenta) : '— sin precio en catálogo'}</span></div>
     <div class="detail-row"><span class="label">🧂 Materia prima</span><span class="value">${fmt(m.materiaPrimaUnit)}</span></div>
-    <div class="detail-row"><span class="label">⏱️ Mano de obra</span><span class="value">${fmt(m.manoObraUnit)} <span style="color:var(--text3);font-size:11px">(${fmt(state.config.valorHora)}/hora)</span></span></div>
-    <div class="detail-row"><span class="label">🔥 Gas</span><span class="value">${fmt(m.gasUnit)}</span></div>
-    <div class="detail-row"><span class="label">📋 Gastos fijos</span><span class="value">${fmt(m.gastosFijosUnit)}</span></div>
     ${m.factorMerma > 1 ? `<div class="detail-row"><span class="label">📉 Ajuste por merma</span><span class="value">×${m.factorMerma.toFixed(2)}</span></div>` : ''}
     <div class="detail-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:8px">
-      <span class="label fw-600">Costo total</span><span class="value fw-600">${fmt(m.costoRealUnit)}</span>
+      <span class="label fw-600">Costo materia prima</span><span class="value fw-600">${fmt(m.costoRealUnit)}</span>
     </div>
     ${m.margen !== null ? `
       <div class="detail-row"><span class="label fw-600">${m.margen >= 0 ? 'Ganancia' : 'Pérdida'}</span><span class="value fw-600" style="color:${c.color}">${fmt(m.margen)} (${m.margen >= 0 ? '+' : ''}${m.margenPct.toFixed(0)}%)</span></div>
     ` : `<div class="detail-row"><span class="label fw-600">Margen</span><span class="value" style="color:var(--text3)">Sin precio de venta cargado</span></div>`}
+    <div style="font-size:11px;color:var(--text3);margin-top:6px">💡 Por ahora el costo sólo incluye materia prima. Mano de obra, gas y gastos fijos se sumarán más adelante cuando tengamos el tiempo real de cada receta.</div>
     <div class="modal-actions"><button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button></div>
   `);
 }
@@ -4649,12 +4845,9 @@ function openCostosReales() {
           <span class="badge" style="background:${c.bg};color:${c.color}">${c.label}</span>
         </div>
         <div class="detail-row"><span class="label">🧂 Materia prima</span><span class="value">${fmt(m.materiaPrimaUnit)}</span></div>
-        <div class="detail-row"><span class="label">⏱️ Mano de obra</span><span class="value">${fmt(m.manoObraUnit)}</span></div>
-        <div class="detail-row"><span class="label">🔥 Gas</span><span class="value">${fmt(m.gasUnit)}</span></div>
-        <div class="detail-row"><span class="label">📋 Gastos fijos</span><span class="value">${fmt(m.gastosFijosUnit)}</span></div>
         ${m.factorMerma > 1 ? `<div class="detail-row"><span class="label">📉 Ajuste por merma</span><span class="value">×${m.factorMerma.toFixed(2)}</span></div>` : ''}
         <div class="detail-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:8px">
-          <span class="label fw-600">Costo real</span><span class="value fw-600">${fmt(m.costoRealUnit)}</span>
+          <span class="label fw-600">Costo materia prima</span><span class="value fw-600">${fmt(m.costoRealUnit)}</span>
         </div>
         <div class="detail-row"><span class="label">Precio de venta</span><span class="value">${m.precioVenta ? fmt(m.precioVenta) : '— sin precio en catálogo'}</span></div>
         ${m.margen !== null ? `
@@ -4666,7 +4859,7 @@ function openCostosReales() {
 
   openModal(`
     <div class="modal-title">📊 Costo real vs. precio</div>
-    <div style="font-size:11px;color:var(--text3);margin-bottom:14px">Costo por unidad de venta, incluye materia prima, mano de obra (${fmt(state.config.valorHora)}/hora) y gastos fijos prorrateados.</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:14px">Costo por unidad de venta, por ahora sólo materia prima (mano de obra, gas y gastos fijos se suman más adelante).</div>
     ${html}
     <div class="modal-actions"><button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button></div>
   `);
@@ -5076,7 +5269,23 @@ function toggleDiaFinanza(fecha) {
   renderFinanzas();
 }
 
+// Ganancia % de un movimiento auto-generado por entrega de pedido, en base
+// al costo de materia prima de sus items (null si el pedido no tiene ninguna
+// receta cargada, o si no es un movimiento ligado a un pedido).
+function gananciaPctMovimiento(m) {
+  if (!m.auto || !m.pedidoId) return null;
+  const p = state.pedidos.find(x => x.id === m.pedidoId);
+  if (!p) return null;
+  const ganancia = calcularGananciaPedido(p);
+  if (ganancia === null || !p.precio) return null;
+  return Math.round((ganancia / p.precio) * 100);
+}
+
 function finanzaItem(m) {
+  const gananciaPct = m.tipo === 'income' ? gananciaPctMovimiento(m) : null;
+  const gananciaTxt = gananciaPct !== null
+    ? ` <span style="font-weight:600;color:${gananciaPct >= 0 ? 'var(--green)' : 'var(--red)'}">(${gananciaPct >= 0 ? '+' : ''}${gananciaPct}%)</span>`
+    : '';
   return `
     <div class="finance-item anim-in" style="cursor:pointer" onclick="openEditMovimiento(${m.id})">
       <div class="finance-dot ${m.tipo}">${m.tipo==='income'?'⬆️':'⬇️'}</div>
@@ -5085,7 +5294,7 @@ function finanzaItem(m) {
         <div class="finance-date">${fmtDate(m.fecha)}</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
-        <div class="finance-amount ${m.tipo}">${m.tipo==='income'?'+':'-'}${fmt(m.monto)}</div>
+        <div class="finance-amount ${m.tipo}">${m.tipo==='income'?'+':'-'}${fmt(m.monto)}${gananciaTxt}</div>
         <button class="btn btn-ghost btn-sm" style="padding:4px 8px;font-size:13px" onclick="event.stopPropagation();openEditMovimiento(${m.id})">✏️</button>
       </div>
     </div>
@@ -5459,41 +5668,6 @@ function renderClientes() {
       : `<div class="list-2col">${clientes.map(c => clienteCard(c)).join('')}</div>`
     }
   `;
-}function openClienteDetalle(nombre) {
-  const c = getClientes().find(x => x.nombre === nombre);
-  if (!c) return;
-  const pedidosOrdenados = [...c.pedidos].sort((a, b) => b.fechaEntrega.localeCompare(a.fechaEntrega));
-  openModal(`
-    <div class="modal-title">👤 ${c.nombre}</div>
-    <div class="summary-grid" style="margin-bottom:16px">
-      <div class="summary-card">
-        <div class="label">Pedidos</div>
-        <div class="amount" style="color:var(--accent)">${c.pedidos.length}</div>
-      </div>
-      <div class="summary-card income">
-        <div class="label">Total gastado</div>
-        <div class="amount">${fmt(c.totalGastado)}</div>
-      </div>
-      <div class="summary-card">
-        <div class="label">Último pedido</div>
-        <div class="amount" style="font-size:13px">${fmtDate(c.ultimoPedido)}</div>
-      </div>
-    </div>
-    <div style="font-weight:600;font-size:14px;margin-bottom:10px;color:var(--text)">Historial de pedidos</div>
-    ${pedidosOrdenados.map(p => `
-      <div class="finance-item" style="margin-bottom:8px">
-        <div class="finance-dot income">📦</div>
-        <div class="finance-info">
-          <div class="finance-desc">${p.producto}</div>
-          <div class="finance-date">${fmtDate(p.fechaEntrega)} · <span class="badge ${estadoBadge(p.estado)}">${estadoLabel(p.estado)}</span></div>
-        </div>
-        <div class="finance-amount income">${fmt(p.precio)}</div>
-      </div>
-    `).join('')}
-    <div class="modal-actions">
-      <button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button>
-    </div>
-  `);
 }
 
 function clienteCard(c) {

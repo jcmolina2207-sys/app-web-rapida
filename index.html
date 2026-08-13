@@ -1813,6 +1813,11 @@ function exportarDatos() {
 
   localStorage.setItem('toque_ultimo_backup', todayStr());
 
+  // Ocultar el cartel de backup: ya se hizo, no debería seguir visible
+  sessionStorage.setItem('toque_backup_banner_oculto', '1');
+  const banner = document.getElementById('backup-banner');
+  if (banner) banner.remove();
+
   showToast('📦 Backup descargado');
 }
 

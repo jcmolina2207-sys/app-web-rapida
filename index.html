@@ -1532,6 +1532,7 @@ async function loadFromFirebase() {
       state.config = { ...state.config, ...configDoc.data() };
     }
     seedDatosSofia();
+    reconciliarMovimientosDesdeEntregados();
     setSyncStatus('ok');
     renderScreen(activeScreen);
   })();
@@ -1619,6 +1620,9 @@ function setupRealtimeSync() {
       });
 
       if (snapshot.docChanges().length > 0) {
+        // Si lo que cambió fueron pedidos, puede haber llegado uno "Entregado"
+        // desde otro dispositivo: generamos su ingreso en Finanzas al toque.
+        if (colName === 'pedidos') reconciliarMovimientosDesdeEntregados();
         renderScreen(activeScreen);
       }
       setSyncStatus('ok');
@@ -2468,6 +2472,21 @@ function generarIngresoAutoSiEntregado(p) {
   state.movimientos.unshift(nuevoMov);
   persistItem('movimientos', nuevoMov);
   return nuevoMov;
+}
+
+// Revisa TODOS los pedidos en estado "Entregado" y genera el ingreso en
+// Finanzas para los que todavía no lo tengan (no duplica: generarIngresoAutoSiEntregado
+// ya chequea si existe). Esto cubre casos donde un pedido quedó desincronizado
+// (ediciones viejas, sync entre dispositivos, restauraciones parciales, etc.)
+// para que Finanzas > Movimientos siempre refleje lo que hay en Pedidos.
+function reconciliarMovimientosDesdeEntregados() {
+  let creados = 0;
+  state.pedidos.forEach(p => {
+    const nuevoMov = generarIngresoAutoSiEntregado(p);
+    if (nuevoMov) creados++;
+  });
+  if (creados > 0) saveState();
+  return creados;
 }
 
 function marcarEntregado(id, fromDash) {
@@ -5377,23 +5396,74 @@ function calcularTopProductosPorCantidad(top = 5) {
 
 // Top productos por ingresos generados (suma de p.items[].subtotal en pedidos entregados) — O(n)
 function calcularTopProductosPorIngresos(top = 5) {
+  const ventas = calcularVentasPorProducto();
+  return [...ventas.values()]
+    .map(v => ({ producto: v.producto, ingresos: v.ingresos, gananciaPct: v.gananciaPct }))
+    .sort((a, b) => b.ingresos - a.ingresos)
+    .slice(0, top);
+}
+
+// Agrupa, por producto, cantidad vendida / ingresos / costo real / ganancia,
+// tomando solo pedidos "Entregado" (son los que ya se cobraron de verdad).
+// El costo real sale de la receta cargada en Costos; si un producto no tiene
+// receta, gananciaPesos/gananciaPct quedan en null (no podemos calcularlo).
+function calcularVentasPorProducto() {
   const mapa = new Map();
   state.pedidos.forEach(p => {
     if (p.estado !== 'done') return;
     (p.items || []).forEach(it => {
       const nombre = (it.producto || '').trim();
       if (!nombre) return;
-      mapa.set(nombre, (mapa.get(nombre) || 0) + (Number(it.subtotal) || 0));
+      const cantidad = Number(it.cantidad) || 0;
+      const ingresos = Number(it.subtotal) || 0;
+      if (!mapa.has(nombre)) {
+        mapa.set(nombre, { producto: nombre, cantidad: 0, ingresos: 0, costoTotal: 0, sinReceta: false });
+      }
+      const bucket = mapa.get(nombre);
+      bucket.cantidad += cantidad;
+      bucket.ingresos += ingresos;
+
+      const esItemPorcion = esPorcion(nombre);
+      const nombreBase = esItemPorcion ? nombreBaseProducto(nombre) : nombre;
+      const receta = state.recetas.find(r => r.producto === nombreBase);
+      const costo = calcularCostoReceta(receta);
+      if (costo) {
+        let costoUnit = costo.costoRealUnit;
+        if (esItemPorcion) {
+          const porciones = receta.porcionesPorUnidad || 1;
+          costoUnit = costoUnit / porciones;
+        }
+        bucket.costoTotal += costoUnit * cantidad;
+      } else {
+        bucket.sinReceta = true;
+      }
     });
   });
-  return [...mapa.entries()]
-    .map(([producto, ingresos]) => ({ producto, ingresos }))
-    .sort((a, b) => b.ingresos - a.ingresos)
+
+  mapa.forEach(b => {
+    b.gananciaPesos = b.sinReceta ? null : (b.ingresos - b.costoTotal);
+    b.gananciaPct = (b.gananciaPesos !== null && b.ingresos > 0)
+      ? Math.round((b.gananciaPesos / b.ingresos) * 100)
+      : null;
+  });
+  return mapa;
+}
+
+// Ranking de productos ordenado por cantidad vendida (más vendidos primero),
+// mostrando cuánta ganancia en pesos (y %) dejó cada uno — sobre pedidos entregados.
+function calcularTopProductosPorGanancia(top = 8) {
+  const ventas = calcularVentasPorProducto();
+  return [...ventas.values()]
+    .sort((a, b) => b.cantidad - a.cantidad)
     .slice(0, top);
 }
 
 function renderFinanzas() {
   const el = document.getElementById('screen-finanzas');
+  // Auto-sincronizar: si hay pedidos "Entregado" sin su ingreso reflejado
+  // (por ej. llegaron por sync de otro dispositivo, o quedaron viejos sin
+  // procesar), los genera acá antes de pintar la pantalla.
+  reconciliarMovimientosDesdeEntregados();
   const saldo = totalSaldo();
   const ingresos = totalIngresos();
   const egresos = totalEgresos();
@@ -5562,6 +5632,7 @@ function renderReportes() {
   const semanas = calcularIngresosEgresosPorSemana(8);
   const topCantidad = calcularTopProductosPorCantidad(5);
   const topIngresos = calcularTopProductosPorIngresos(5);
+  const topGanancia = calcularTopProductosPorGanancia(8);
 
   const rankRow = (label, valueLabel, pct, colorVar) => `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
@@ -5576,8 +5647,32 @@ function renderReportes() {
       </div>
     </div>`;
 
+  // Fila del ranking por ganancia: producto + cantidad vendida a la izquierda,
+  // ganancia en pesos (y %) a la derecha. Si no hay receta cargada, avisa en vez de inventar un número.
+  const gananciaRow = (t, maxCant) => {
+    const gananciaLabel = t.gananciaPesos === null
+      ? `<span style="color:var(--text3);font-size:11px">Sin receta cargada</span>`
+      : `<span style="font-weight:700;color:var(--green)">+${fmt(t.gananciaPesos)}</span>${t.gananciaPct !== null ? ` <span style="font-weight:600;color:var(--green);font-size:11.5px">(${t.gananciaPct}%)</span>` : ''}`;
+    return `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;margin-bottom:4px;align-items:baseline">
+            <span style="font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.producto}</span>
+            <span style="white-space:nowrap">${gananciaLabel}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+            <div style="background:var(--surface2);border-radius:6px;height:7px;overflow:hidden;flex:1">
+              <div style="width:${Math.max(6, (t.cantidad / maxCant) * 100)}%;height:100%;background:var(--accent);border-radius:6px"></div>
+            </div>
+            <span style="font-size:10.5px;color:var(--text3);white-space:nowrap">${t.cantidad} un.</span>
+          </div>
+        </div>
+      </div>`;
+  };
+
   const maxCant = Math.max(1, ...topCantidad.map(t => t.cantidad));
   const maxIng = Math.max(1, ...topIngresos.map(t => t.ingresos));
+  const maxCantGanancia = Math.max(1, ...topGanancia.map(t => t.cantidad));
 
   return `
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-bottom:16px;box-shadow:var(--shadow)">
@@ -5599,7 +5694,16 @@ function renderReportes() {
         <div style="font-size:11px;color:var(--text3);margin-bottom:10px;margin-top:-6px">Sobre pedidos entregados</div>
         ${topIngresos.length === 0
           ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">Todavía no hay pedidos entregados</p></div>`
-          : topIngresos.map(t => rankRow(t.producto, fmt(t.ingresos), Math.max(6, (t.ingresos / maxIng) * 100), 'var(--green)')).join('')
+          : topIngresos.map(t => rankRow(t.producto, `${fmt(t.ingresos)}${t.gananciaPct !== null ? ` <span style="font-size:11px">(${t.gananciaPct}%)</span>` : ''}`, Math.max(6, (t.ingresos / maxIng) * 100), 'var(--green)')).join('')
+        }
+      </div>
+
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;box-shadow:var(--shadow)">
+        <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:12px">📦 Ranking por ganancia · orden más vendidos</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:10px;margin-top:-6px">Sobre pedidos entregados · ganancia = precio de venta − costo real (según receta)</div>
+        ${topGanancia.length === 0
+          ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">Todavía no hay pedidos entregados</p></div>`
+          : topGanancia.map(t => gananciaRow(t, maxCantGanancia)).join('')
         }
       </div>
     </div>

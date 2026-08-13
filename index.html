@@ -1130,6 +1130,16 @@ function persistIngredientesDeItems(items) {
   });
 }
 
+// Igual que persistIngredientesDeItems, pero a partir de una lista de IDs
+// de ingrediente directa (ej. la que sale de un `stockDetalle` guardado),
+// en vez de tener que recalcular a partir de items + receta actual.
+function persistIngredientesPorIds(ids) {
+  new Set(ids).forEach(id => {
+    const ing = state.ingredientes.find(i => i.id === id);
+    if (ing) persistItem('ingredientes', ing);
+  });
+}
+
 function nextId() { return ++state.nextId; }
 
 // Parsear precio formato argentino: 17.600 → 17600, 17,5 → 17.5
@@ -2171,11 +2181,22 @@ function marcarEntregado(id, fromDash) {
   const p = state.pedidos.find(x => x.id === id);
   if (!p || p.estado === 'done') return;
   p.estado = 'done';
+  // El stock recién se descuenta ACÁ, al entregar — no al crear el pedido.
+  // Si por algún motivo ya se había descontado antes (ej. se cargó
+  // directamente como "Entregado" desde el form de edición), no se
+  // vuelve a descontar.
+  let descuentos = [];
+  if (!p.stockDescontado) {
+    descuentos = descontarMateriaPrimaByPedido(p.items || []);
+    persistIngredientesPorIds(descuentos.detalle.map(d => d.ingId));
+    p.stockDescontado = true;
+    p.stockDetalle = descuentos.detalle;
+  }
   const nuevoMov = generarIngresoAutoSiEntregado(p);
   persistItem('pedidos', p);
   saveState();
   closeModal();
-  showToast('✅ Pedido entregado · Ingreso registrado');
+  showToast(descuentos.length > 0 ? '✅ Pedido entregado · Ingreso registrado · 🧂 stock descontado' : '✅ Pedido entregado · Ingreso registrado');
   renderScreen(activeScreen);
 }
 
@@ -2234,14 +2255,18 @@ function togglePagoCompletoPedido(id, checked) {
 function confirmEliminarPedido(id) {
   showConfirm('¿Eliminar pedido?', 'Esta acción no se puede deshacer.', () => {
     const pedido = state.pedidos.find(p => p.id === id);
-    if (pedido && pedido.items && pedido.items.length > 0) {
-      revertirMateriaPrimaByPedido(pedido.items);
-      persistIngredientesDeItems(pedido.items);
+    // Solo hay stock que devolver si este pedido llegó a descontarlo (es
+    // decir, si ya figuraba como Entregado). Un pedido pendiente/en
+    // preparación nunca tocó el stock, así que no hay nada que revertir.
+    const huboDescuento = pedido && pedido.stockDescontado && pedido.stockDetalle && pedido.stockDetalle.length > 0;
+    if (huboDescuento) {
+      revertirMateriaPrimaByPedido(pedido.stockDetalle);
+      persistIngredientesPorIds(pedido.stockDetalle.map(d => d.ingId));
     }
     state.pedidos = state.pedidos.filter(p => p.id !== id);
     removeItem('pedidos', id);
     saveState(); closeModal();
-    showToast('Pedido eliminado · stock repuesto');
+    showToast(huboDescuento ? 'Pedido eliminado · stock repuesto' : 'Pedido eliminado');
     renderScreen(activeScreen);
   });
 }
@@ -3682,13 +3707,44 @@ function savePedidoConfirmado(id) {
   const procederGuardado = () => {
     if (id) {
       const idx = state.pedidos.findIndex(p => p.id === id);
-      const itemsAnteriores = state.pedidos[idx].items || [];
-      // Ajustar stock: devolver lo descontado con los items viejos y
-      // volver a descontar según los items nuevos
-      revertirMateriaPrimaByPedido(itemsAnteriores);
-      const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
-      persistIngredientesDeItems([...itemsAnteriores, ..._pedidoItems]);
-      state.pedidos[idx] = { ...state.pedidos[idx], ...data };
+      const pedidoAnterior = state.pedidos[idx];
+      const itemsAnteriores = pedidoAnterior.items || [];
+      // El stock ya NO se descuenta al crear/editar un pedido — se
+      // descuenta solo cuando queda en estado "Entregado" (ver
+      // marcarEntregado()). Acá solo hay que ajustar el stock si este
+      // pedido en particular ya lo tenía descontado y/o si la edición lo
+      // deja o lo saca del estado "Entregado".
+      const estabaDescontado = !!pedidoAnterior.stockDescontado;
+      const detalleAnterior = pedidoAnterior.stockDetalle || [];
+      const quedaEntregado = data.estado === 'done';
+
+      let descuentos = [];
+      let stockDescontado = estabaDescontado;
+      let stockDetalle = detalleAnterior;
+
+      if (estabaDescontado && quedaEntregado) {
+        // Seguía entregado: devolver lo viejo y descontar de nuevo por si
+        // cambiaron los items del pedido.
+        revertirMateriaPrimaByPedido(detalleAnterior);
+        descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
+        persistIngredientesPorIds([...detalleAnterior.map(d => d.ingId), ...descuentos.detalle.map(d => d.ingId)]);
+        stockDetalle = descuentos.detalle;
+      } else if (estabaDescontado && !quedaEntregado) {
+        // Se sacó de "Entregado": devolver el stock reservado.
+        revertirMateriaPrimaByPedido(detalleAnterior);
+        persistIngredientesPorIds(detalleAnterior.map(d => d.ingId));
+        stockDescontado = false;
+        stockDetalle = [];
+      } else if (!estabaDescontado && quedaEntregado) {
+        // Se cargó/editó directamente como "Entregado": descontar ahora.
+        descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
+        persistIngredientesPorIds(descuentos.detalle.map(d => d.ingId));
+        stockDescontado = true;
+        stockDetalle = descuentos.detalle;
+      }
+      // si !estabaDescontado && !quedaEntregado → no se toca el stock
+
+      state.pedidos[idx] = { ...pedidoAnterior, ...data, stockDescontado, stockDetalle };
       const ingresoAuto = generarIngresoAutoSiEntregado(state.pedidos[idx]);
       persistItem('pedidos', state.pedidos[idx]);
       saveState(); closeModal();
@@ -3701,10 +3757,17 @@ function savePedidoConfirmado(id) {
       }
     } else {
       const nuevoPedido = { id: nextId(), ...data };
+      // Solo se descuenta stock acá si el pedido se está cargando
+      // directamente como "Entregado" (ej. pedidos viejos ya cobrados).
+      // El caso normal (pending/prep) descuenta recién en marcarEntregado().
+      let descuentos = [];
+      if (data.estado === 'done') {
+        descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
+        persistIngredientesPorIds(descuentos.detalle.map(d => d.ingId));
+        nuevoPedido.stockDescontado = true;
+        nuevoPedido.stockDetalle = descuentos.detalle;
+      }
       state.pedidos.push(nuevoPedido);
-      // Descontar materia prima según recetas
-      const descuentos = descontarMateriaPrimaByPedido(_pedidoItems);
-      persistIngredientesDeItems(_pedidoItems);
       const ingresoAuto = generarIngresoAutoSiEntregado(nuevoPedido);
       persistItem('pedidos', nuevoPedido);
       saveState(); closeModal();
@@ -4585,8 +4648,16 @@ function verificarStockSuficiente(items) {
   return advertencias;
 }
 
+// Descuenta materia prima y devuelve un array de textos descriptivos (como
+// antes) con una propiedad extra `.detalle` = [{ingId, cantidad}] con lo
+// REALMENTE descontado de cada ingrediente (ya clampeado a 0 si el stock no
+// alcanzaba). Ese detalle es la fuente de verdad para revertir con
+// precisión más adelante — revertirMateriaPrimaByPedido() ya no recalcula a
+// partir de la receta, porque si un descuento pisó el piso de 0 stock, la
+// receta actual no alcanza para saber cuánto se descontó de verdad.
 function descontarMateriaPrimaByPedido(items) {
   const descuentos = [];
+  const detalle = [];
   items.forEach(item => {
     const esItemPorcion = esPorcion(item.producto);
     const nombreBase = esItemPorcion ? nombreBaseProducto(item.producto) : item.producto;
@@ -4610,42 +4681,33 @@ function descontarMateriaPrimaByPedido(items) {
       const ing = state.ingredientes.find(x => x.id === ri.ingId);
       if (!ing) return;
       const cantDescontar = Math.round(ri.cantidad * factor * 1000) / 1000;
+      // Lo realmente descontado no puede superar el stock disponible —
+      // si cantDescontar > ing.stock, solo se "gastó" lo que había.
+      const cantRealDescontada = Math.round(Math.min(cantDescontar, ing.stock) * 1000) / 1000;
       ing.stock = Math.max(0, Math.round((ing.stock - cantDescontar) * 1000) / 1000);
+      detalle.push({ ingId: ing.id, cantidad: cantRealDescontada });
       descuentos.push(`${ing.nombre}: -${cantDescontar} ${ing.unidad}`);
     });
   });
+  descuentos.detalle = detalle;
   return descuentos;
 }
 
 /**
- * Revierte (devuelve) la materia prima descontada por un pedido.
- * Se usa al editar un pedido (para deshacer los items viejos antes de
- * aplicar los nuevos) y al eliminar un pedido (para devolver todo el stock).
- * Usa la misma lógica de factor que descontarMateriaPrimaByPedido, en reversa.
+ * Revierte (devuelve) la materia prima descontada por un pedido, a partir
+ * del `detalle` guardado por descontarMateriaPrimaByPedido (NO a partir de
+ * los items/receta del pedido). Esto evita "inflar" el stock: si en su
+ * momento el descuento pisó el piso de 0 porque no alcanzaba, acá se
+ * devuelve exactamente esa misma cantidad real, no la cantidad teórica que
+ * marcaría la receta.
  */
-function revertirMateriaPrimaByPedido(items) {
+function revertirMateriaPrimaByPedido(detalle) {
   const reversiones = [];
-  (items || []).forEach(item => {
-    const esItemPorcion = esPorcion(item.producto);
-    const nombreBase = esItemPorcion ? nombreBaseProducto(item.producto) : item.producto;
-    const receta = state.recetas.find(r => r.producto === nombreBase);
-    if (!receta || !receta.ingredientes || receta.ingredientes.length === 0) return;
-
-    let factor;
-    if (esItemPorcion) {
-      const porciones = receta.porcionesPorUnidad || 1;
-      factor = (item.cantidad / porciones) / receta.rinde;
-    } else {
-      factor = item.cantidad / receta.rinde;
-    }
-
-    receta.ingredientes.forEach(ri => {
-      const ing = state.ingredientes.find(x => x.id === ri.ingId);
-      if (!ing) return;
-      const cantDevolver = Math.round(ri.cantidad * factor * 1000) / 1000;
-      ing.stock = Math.round((ing.stock + cantDevolver) * 1000) / 1000;
-      reversiones.push(`${ing.nombre}: +${cantDevolver} ${ing.unidad}`);
-    });
+  (detalle || []).forEach(({ ingId, cantidad }) => {
+    const ing = state.ingredientes.find(x => x.id === ingId);
+    if (!ing || !cantidad) return;
+    ing.stock = Math.round((ing.stock + cantidad) * 1000) / 1000;
+    reversiones.push(`${ing.nombre}: +${cantidad} ${ing.unidad}`);
   });
   return reversiones;
 }

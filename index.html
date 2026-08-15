@@ -1302,6 +1302,10 @@ let state = {
   config: {
     horasProductivasMes: 256, // martes a domingo, 8-14 y 16-19:30, ~27 días/mes
     valorHora: 7200,          // convenio Ayudante Pastelero ($1.444.937 / 200hs), ajustable
+    horarioSueldo: {          // horario detallado, sólo para el reporte de "sueldo simulado" (Finanzas > Reportes)
+      diasPorSemana: 6,       // martes a domingo
+      turnos: [{ inicio: '09:00', fin: '13:00' }, { inicio: '15:00', fin: '19:00' }],
+    },
   },
   nextId: 1,
 };
@@ -1573,6 +1577,19 @@ function seedDatosSofia() {
 
   if (!state.config.valorHora) {
     state.config.valorHora = 7200; // convenio Ayudante Pastelero, ajustable después
+    cambio = true;
+  }
+
+  if (!state.config.horarioSueldo) {
+    state.config.horarioSueldo = horarioSueldoDefault();
+    cambio = true;
+  }
+
+  // Reparto sugerido de cada ingreso (Finanzas > Reportes > "¿Qué hacer con
+  // este ingreso?"). Puramente informativo: no genera movimientos ni toca
+  // el saldo real. Ver REPARTO_ETAPAS más abajo para los presets por etapa.
+  if (!state.config.reparto) {
+    state.config.reparto = { materiaPrima: 55, ahorro: 25, sueldo: 15, colchon: 5 };
     cambio = true;
   }
 
@@ -2709,11 +2726,16 @@ function renderCatalogoLista() {
       const precioPorcionStr = item.precioPorcion
         ? ` <span style="color:var(--text3);font-size:11px">· porción $${Number(item.precioPorcion).toLocaleString('es-AR')}</span>`
         : (admitePorcion(item.nombre) ? ` <span style="color:var(--text3);font-size:11px">· sin precio de porción</span>` : '');
+      // Margen (% y $) contra el costo real de la receta, si hay una cargada (no toca calcularCostoReceta)
+      const margenInfo = calcularMargenProducto(item.nombre);
+      const margenBadge = (margenInfo && !margenInfo.sinReceta && margenInfo.margenPct !== null)
+        ? ` <span style="font-size:11px;font-weight:600;color:${margenInfo.margenPct >= 0 ? 'var(--green)' : 'var(--red)'}">${margenInfo.margenPct >= 0 ? '+' : ''}${Math.round(margenInfo.margenPct)}% (${fmt(margenInfo.margen)})</span>`
+        : '';
       html += `
         <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px">
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;color:var(--text)">${item.nombre}</div>
-            <div style="margin-top:2px">${precioStr}${precioPorcionStr}</div>
+            <div style="margin-top:2px">${precioStr}${precioPorcionStr}${margenBadge}</div>
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0;margin-left:8px">
             ${esCustom
@@ -3080,7 +3102,7 @@ function renderItemsList() {
         const margenPct = (margen / item.precioUnit) * 100;
         const c = margenColor({ margenPct });
         margenHtml = `<div style="font-size:11px;margin-top:2px">
-          <span style="color:${c.color};font-weight:600">Costo materia prima: ${fmt(costoRealAjustado)} · Ganancia: ${margenPct.toFixed(0)}% (${c.label})</span>
+          <span style="color:${c.color};font-weight:600">Costo materia prima: ${fmt(costoRealAjustado)} · Ganancia: ${margenPct.toFixed(0)}% (${fmt(margen)}) · ${c.label}</span>
         </div>`;
       } else if (item.precioUnit === 0) {
         margenHtml = `<div style="font-size:11px;margin-top:2px;color:var(--red);font-weight:600">⚠️ Falta precio — tocá ✕ y volvé a cargarlo</div>`;
@@ -4374,6 +4396,73 @@ function saveConfigCostos() {
   renderScreen(activeScreen);
 }
 
+// Configuración del recuadro "Costo real si fuera sueldo" (Finanzas > Reportes).
+// Comparte state.config.valorHora con la configuración de costos de arriba;
+// agrega el horario detallado en state.config.horarioSueldo (config aparte).
+function openConfigSueldoSimulado() {
+  const h = state.config.horarioSueldo || horarioSueldoDefault();
+  const t1 = (h.turnos && h.turnos[0]) || { inicio: '09:00', fin: '13:00' };
+  const t2 = (h.turnos && h.turnos[1]) || { inicio: '', fin: '' };
+  openModal(`
+    <div class="modal-title">⚙️ Sueldo simulado</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:12px">Se usa sólo para el recuadro "Costo real si fuera sueldo" en Finanzas &gt; Reportes. No afecta el costo mostrado en Recetas ni en Pedidos.</div>
+
+    <div class="form-group">
+      <label class="form-label">Valor de tu hora ($)</label>
+      <input class="form-input" id="f-sueldo-valorhora" type="text" inputmode="decimal" value="${state.config.valorHora}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">
+        Referencia orientativa: ~$5.600/hora según convenio CCT 329/2000 "Ayudante Pastelero" (marzo 2026). Es sólo una guía — los sueldos suben con la inflación, editalo cuando haga falta.
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="document.getElementById('f-sueldo-valorhora').value=5600">Usar $5.600 de referencia</button>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Días trabajados por semana</label>
+      <input class="form-input" id="f-sueldo-dias" type="number" min="1" max="7" step="1" value="${h.diasPorSemana || 6}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Ej: 6 = martes a domingo</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Turno 1</label>
+      <div class="flex gap-8">
+        <input class="form-input" id="f-sueldo-t1-inicio" type="time" value="${t1.inicio}">
+        <input class="form-input" id="f-sueldo-t1-fin" type="time" value="${t1.fin}">
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Turno 2 (opcional — dejar vacío si no hay corte al mediodía)</label>
+      <div class="flex gap-8">
+        <input class="form-input" id="f-sueldo-t2-inicio" type="time" value="${t2.inicio}">
+        <input class="form-input" id="f-sueldo-t2-fin" type="time" value="${t2.fin}">
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="saveConfigSueldoSimulado()">💾 Guardar</button>
+    </div>
+  `);
+}
+
+function saveConfigSueldoSimulado() {
+  state.config.valorHora = parsePrecio(document.getElementById('f-sueldo-valorhora').value);
+
+  const dias = parseInt(document.getElementById('f-sueldo-dias').value, 10) || 6;
+  const t1Inicio = document.getElementById('f-sueldo-t1-inicio').value || '09:00';
+  const t1Fin = document.getElementById('f-sueldo-t1-fin').value || '13:00';
+  const t2Inicio = document.getElementById('f-sueldo-t2-inicio').value;
+  const t2Fin = document.getElementById('f-sueldo-t2-fin').value;
+
+  const turnos = [{ inicio: t1Inicio, fin: t1Fin }];
+  if (t2Inicio && t2Fin) turnos.push({ inicio: t2Inicio, fin: t2Fin });
+
+  state.config.horarioSueldo = { diasPorSemana: dias, turnos };
+  saveState(); closeModal();
+  showToast('⚙️ Sueldo simulado actualizado');
+  renderScreen(activeScreen);
+}
+
 function ingredienteItem(i) {
   const pct = stockPct(i);
   const color = stockColor(pct);
@@ -5099,6 +5188,92 @@ function costoFijoPorHoraProductiva() {
   return totalMensual / horas;
 }
 
+/* ============================================================
+   SUELDO SIMULADO — cálculo aparte para Finanzas > Reportes.
+   Estima cuánto costaría la producción si el tiempo de Sofía se pagara
+   como sueldo de empleada. NO modifica calcularCostoReceta ni
+   calcularGananciaPedido: es sólo para mostrar una comparación.
+============================================================ */
+
+// Horario por defecto (martes a domingo, 9-13 y 15-19hs)
+function horarioSueldoDefault() {
+  return {
+    diasPorSemana: 6,
+    turnos: [{ inicio: '09:00', fin: '13:00' }, { inicio: '15:00', fin: '19:00' }],
+  };
+}
+
+function horasPorTurno(turno) {
+  const [hI, mI] = (turno.inicio || '0:0').split(':').map(Number);
+  const [hF, mF] = (turno.fin || '0:0').split(':').map(Number);
+  const minutos = (hF * 60 + mF) - (hI * 60 + mI);
+  return Math.max(0, minutos / 60);
+}
+
+function horasPorDiaSueldo() {
+  const h = state.config.horarioSueldo || horarioSueldoDefault();
+  return (h.turnos || []).reduce((acc, t) => acc + horasPorTurno(t), 0);
+}
+
+const SEMANAS_POR_MES = 4.345; // 30.44 días / 7
+
+function horasSueldoSimuladoPorMes() {
+  const h = state.config.horarioSueldo || horarioSueldoDefault();
+  const diasPorSemana = h.diasPorSemana || 6;
+  return horasPorDiaSueldo() * diasPorSemana * SEMANAS_POR_MES;
+}
+
+// Costo real por hora de trabajo: el valor hora configurado (state.config.valorHora,
+// reutilizado — es el mismo campo que ya existía para "mano de obra") más los
+// gastos fijos ya prorateados por hora productiva (costoFijoPorHoraProductiva,
+// función existente, antes sin uso).
+function costoHoraSueldoSimulado() {
+  return state.config.valorHora || 0;
+}
+
+function sueldoMensualSimulado() {
+  return costoHoraSueldoSimulado() * horasSueldoSimuladoPorMes();
+}
+
+// Costo de mano de obra por unidad de una receta, según su tiempoMinutos y rinde.
+// Cálculo aparte de calcularCostoReceta, sólo para la comparación en Reportes.
+function costoManoDeObraUnitReceta(receta) {
+  if (!receta || !receta.rinde || !receta.tiempoMinutos) return 0;
+  const horasUnit = (receta.tiempoMinutos / 60) / receta.rinde;
+  return horasUnit * costoHoraSueldoSimulado();
+}
+
+// Compara el margen actual (sólo materia prima, igual que calcularMargenProducto)
+// contra el margen simulado sumando el costo de mano de obra de la receta.
+function calcularMargenConSueldoSimulado(nombreProducto) {
+  const receta = state.recetas.find(r => r.producto === nombreProducto);
+  const costo = calcularCostoReceta(receta);
+  const enCatalogo = getCatalogo().find(p => p.nombre === nombreProducto);
+  const precioVenta = enCatalogo ? enCatalogo.precio : null;
+  if (!costo || !precioVenta) return null;
+
+  const costoManoObra = costoManoDeObraUnitReceta(receta);
+  const costoConSueldo = costo.costoRealUnit + costoManoObra;
+
+  const margenActual = precioVenta - costo.costoRealUnit;
+  const margenActualPct = precioVenta > 0 ? (margenActual / precioVenta) * 100 : null;
+  const margenConSueldo = precioVenta - costoConSueldo;
+  const margenConSueldoPct = precioVenta > 0 ? (margenConSueldo / precioVenta) * 100 : null;
+
+  return {
+    producto: nombreProducto, precioVenta,
+    costoManoObra, tieneTiempo: !!receta.tiempoMinutos,
+    margenActual, margenActualPct,
+    margenConSueldo, margenConSueldoPct,
+  };
+}
+
+function calcularTodosMargenesConSueldoSimulado() {
+  return state.recetas
+    .map(r => calcularMargenConSueldoSimulado(r.producto))
+    .filter(Boolean);
+}
+
 // Desglose de costo real de una receta, por unidad de venta.
 // Por ahora sólo considera materia prima (+ ajuste por merma): todavía no
 // tenemos el tiempo real de cada receta cargado, así que mano de obra, gas
@@ -5203,7 +5378,7 @@ function renderMargenBadgeReceta(receta) {
   const positivo = m.margenPct >= 0;
   const color = positivo ? 'var(--green)' : 'var(--red)';
   const signo = positivo ? '+' : '';
-  return `<span class="receta-margen" style="font-size:12px;font-weight:600;color:${color};cursor:pointer" onclick="openMargenRecetaModal('${nombreEscapado}')">(${signo}${Math.round(m.margenPct)}%)</span>`;
+  return `<span class="receta-margen" style="font-size:12px;font-weight:600;color:${color};cursor:pointer" onclick="openMargenRecetaModal('${nombreEscapado}')">(${signo}${Math.round(m.margenPct)}% · ${fmt(m.margen)})</span>`;
 }
 
 // Modal con el detalle del costo real vs. precio de UNA receta (reemplaza a la vista comparativa global)
@@ -5332,6 +5507,19 @@ function initIngNombreAutocomplete(editingId) {
 /* -------- FINANZAS -------- */
 let finanzasVista = 'lista'; // 'lista' | 'dia' | 'calendario' | 'reportes'
 let finanzasDiaExpandido = null;
+let repartoMovId = null; // id del movimiento de ingreso seleccionado en el desglose de reparto (Reportes)
+
+// Presets de reparto por "etapa" del negocio — pensado para que Sofía/Juan
+// puedan elegir manualmente cuál usar a medida que el negocio crece (botones
+// de acceso rápido en openConfigReparto()). Sólo carga los valores en el
+// formulario; el usuario todavía tiene que confirmar con "Guardar".
+// TODO (futuro): guardar state.config.repartoEtapaActual y mostrarla como
+// chip informativo junto al desglose, en vez de sólo usarla al configurar.
+const REPARTO_ETAPAS = {
+  inicial:       { label: 'Inicial',       materiaPrima: 55, ahorro: 25, sueldo: 15, colchon: 5 },
+  consolidacion: { label: 'Consolidación', materiaPrima: 50, ahorro: 20, sueldo: 25, colchon: 5 },
+  madura:        { label: 'Madura',        materiaPrima: 45, ahorro: 15, sueldo: 35, colchon: 5 },
+};
 let finanzasAgendaInicio = todayStr(); // fecha ISO del primer día visible en el calendario de finanzas
 
 /* ============================================================
@@ -5723,6 +5911,209 @@ function renderReportes() {
         }
       </div>
     </div>
+
+    ${renderReporteSueldoSimulado()}
+    ${renderReporteReparto()}
+  `;
+}
+
+// ------------------------------------------------------------------
+// "¿Qué hacer con este ingreso?" — desglose sugerido de reparto
+// (Finanzas > Reportes). Es puramente informativo/visual: no genera
+// movimientos, no toca state.movimientos ni el saldo real. Los % salen
+// de state.config.reparto (configurables desde openConfigReparto()).
+// ------------------------------------------------------------------
+function renderReporteReparto() {
+  const ingresos = state.movimientos
+    .filter(m => m.tipo === 'income')
+    .sort((a, b) => b.fecha.localeCompare(a.fecha) || b.id - a.id)
+    .slice(0, 50);
+
+  const r = state.config.reparto || { materiaPrima: 55, ahorro: 25, sueldo: 15, colchon: 5 };
+
+  // Si el movimiento seleccionado ya no existe (ej: se borró), soltarlo.
+  if (repartoMovId !== null && !ingresos.some(m => m.id === repartoMovId)) {
+    repartoMovId = null;
+  }
+
+  const opciones = ingresos.map(m =>
+    `<option value="${m.id}" ${m.id === repartoMovId ? 'selected' : ''}>${m.descripcion} — ${fmt(m.monto)} (${m.fecha})</option>`
+  ).join('');
+
+  const movSel = ingresos.find(m => m.id === repartoMovId);
+
+  const partidas = [
+    { key: 'materiaPrima', label: '🧂 Materia prima / insumos', color: 'var(--accent)' },
+    { key: 'ahorro',       label: '🐖 Ahorro / reinversión',    color: 'var(--green)' },
+    { key: 'sueldo',       label: '👩‍🍳 Sueldo de Sofía',        color: 'var(--gold, var(--accent))' },
+    { key: 'colchon',      label: '🛟 Colchón / imprevistos',    color: 'var(--text3)' },
+  ];
+
+  const desglose = !movSel ? '' : partidas.map(p => {
+    const pct = r[p.key] || 0;
+    const monto = Math.round(movSel.monto * pct / 100);
+    return `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;margin-bottom:4px">
+            <span style="font-weight:700;color:var(--text)">${p.label}</span>
+            <span style="font-weight:700;color:var(--text)">${fmt(monto)} <span style="color:var(--text3);font-weight:600">(${pct}%)</span></span>
+          </div>
+          <div style="background:var(--surface2);border-radius:6px;height:7px;overflow:hidden">
+            <div style="width:${Math.max(2, pct)}%;height:100%;background:${p.color};border-radius:6px"></div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-top:12px;box-shadow:var(--shadow)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;gap:8px">
+        <div style="font-weight:700;font-size:14px;color:var(--text)">💡 ¿Qué hacer con este ingreso?</div>
+        <button class="btn btn-ghost btn-sm" onclick="openConfigReparto()">⚙️ Configurar</button>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:12px">Sugerencia de distribución sobre un ingreso puntual — es sólo una guía, no genera movimientos ni modifica el saldo real.</div>
+
+      ${ingresos.length === 0
+        ? `<div class="empty-state" style="padding:12px 0"><p style="font-size:12px">Todavía no hay ingresos registrados</p></div>`
+        : `
+          <select class="form-input" style="margin-bottom:${movSel ? '12px' : '0'}" onchange="setRepartoMov(this.value)">
+            <option value="">Elegí un ingreso…</option>
+            ${opciones}
+          </select>
+          ${desglose}
+        `
+      }
+    </div>
+  `;
+}
+
+function setRepartoMov(id) {
+  repartoMovId = id === '' ? null : Number(id);
+  renderFinanzas();
+}
+
+function openConfigReparto() {
+  const r = state.config.reparto || { materiaPrima: 55, ahorro: 25, sueldo: 15, colchon: 5 };
+  const etapaBtns = Object.entries(REPARTO_ETAPAS).map(([key, e]) =>
+    `<button type="button" class="btn btn-ghost btn-sm" onclick="aplicarEtapaReparto('${key}')">${e.label}</button>`
+  ).join('');
+
+  openModal(`
+    <div class="modal-title">⚙️ Reparto sugerido del ingreso</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:12px">Los 4 porcentajes deben sumar 100%. Se usan sólo como guía visual en Finanzas &gt; Reportes.</div>
+
+    <div class="form-group">
+      <label class="form-label">🧂 Materia prima / insumos (%)</label>
+      <input class="form-input" id="f-reparto-materia" type="number" min="0" max="100" step="1" value="${r.materiaPrima}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">🐖 Ahorro / reinversión (%)</label>
+      <input class="form-input" id="f-reparto-ahorro" type="number" min="0" max="100" step="1" value="${r.ahorro}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">👩‍🍳 Sueldo de Sofía (%)</label>
+      <input class="form-input" id="f-reparto-sueldo" type="number" min="0" max="100" step="1" value="${r.sueldo}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">🛟 Colchón / imprevistos (%)</label>
+      <input class="form-input" id="f-reparto-colchon" type="number" min="0" max="100" step="1" value="${r.colchon}">
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Presets por etapa del negocio</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${etapaBtns}</div>
+    </div>
+
+    <div id="f-reparto-error" style="font-size:11.5px;color:var(--red);margin-bottom:8px;display:none">Los porcentajes deben sumar 100%.</div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" onclick="saveConfigReparto()">💾 Guardar</button>
+    </div>
+  `);
+}
+
+function aplicarEtapaReparto(key) {
+  const e = REPARTO_ETAPAS[key];
+  if (!e) return;
+  document.getElementById('f-reparto-materia').value = e.materiaPrima;
+  document.getElementById('f-reparto-ahorro').value = e.ahorro;
+  document.getElementById('f-reparto-sueldo').value = e.sueldo;
+  document.getElementById('f-reparto-colchon').value = e.colchon;
+}
+
+function saveConfigReparto() {
+  const materiaPrima = parseFloat(document.getElementById('f-reparto-materia').value) || 0;
+  const ahorro = parseFloat(document.getElementById('f-reparto-ahorro').value) || 0;
+  const sueldo = parseFloat(document.getElementById('f-reparto-sueldo').value) || 0;
+  const colchon = parseFloat(document.getElementById('f-reparto-colchon').value) || 0;
+  const suma = materiaPrima + ahorro + sueldo + colchon;
+
+  if (Math.round(suma) !== 100) {
+    document.getElementById('f-reparto-error').style.display = 'block';
+    document.getElementById('f-reparto-error').textContent = `Los porcentajes suman ${suma}%, deben sumar 100%.`;
+    return;
+  }
+
+  state.config.reparto = { materiaPrima, ahorro, sueldo, colchon };
+  saveState(); closeModal();
+  showToast('⚙️ Reparto actualizado');
+  renderScreen(activeScreen);
+}
+
+// Recuadro "Costo real si fuera sueldo" — simulación aparte, no toca
+// calcularCostoReceta ni los reportes existentes de arriba.
+function renderReporteSueldoSimulado() {
+  const horario = state.config.horarioSueldo || horarioSueldoDefault();
+  const horaCosto = costoHoraSueldoSimulado();
+  const horasMes = horasSueldoSimuladoPorMes();
+  const sueldoMes = sueldoMensualSimulado();
+  const comparaciones = calcularTodosMargenesConSueldoSimulado();
+
+  const filaCompara = comparaciones.map(c => {
+    const colorActual = c.margenActualPct >= 0 ? 'var(--green)' : 'var(--red)';
+    const colorSim = c.margenConSueldoPct === null ? 'var(--text3)' : (c.margenConSueldoPct >= 0 ? 'var(--green)' : 'var(--red)');
+    const avisoTiempo = !c.tieneTiempo ? ` <span style="color:var(--text3);font-size:10px">(sin ⏱️ tiempo cargado)</span>` : '';
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)">
+        <div style="flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.producto}${avisoTiempo}</div>
+        <div style="text-align:right;white-space:nowrap;font-size:11.5px">
+          <span style="color:${colorActual};font-weight:700">${c.margenActualPct.toFixed(0)}%</span>
+          <span style="color:var(--text3)"> → </span>
+          <span style="color:${colorSim};font-weight:700">${c.margenConSueldoPct !== null ? c.margenConSueldoPct.toFixed(0) + '%' : '—'}</span>
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-top:12px;box-shadow:var(--shadow)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;gap:8px">
+        <div style="font-weight:700;font-size:14px;color:var(--text)">👩‍🍳 Costo real si fuera sueldo</div>
+        <button class="btn btn-ghost btn-sm" onclick="openConfigSueldoSimulado()">⚙️ Configurar</button>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:12px">Simulación aparte: cuánto costaría la producción si el tiempo de Sofía se pagara como sueldo de empleada (${horario.diasPorSemana || 6} días/semana). No modifica el costo real que se usa en Recetas ni en Pedidos.</div>
+
+      <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:110px;background:var(--surface2);border-radius:var(--radius-sm);padding:10px">
+          <div style="font-size:10.5px;color:var(--text3)">Costo por hora</div>
+          <div style="font-size:15px;font-weight:700;color:var(--text)">${fmt(horaCosto)}</div>
+        </div>
+        <div style="flex:1;min-width:110px;background:var(--surface2);border-radius:var(--radius-sm);padding:10px">
+          <div style="font-size:10.5px;color:var(--text3)">Horas / mes</div>
+          <div style="font-size:15px;font-weight:700;color:var(--text)">${horasMes.toFixed(0)} hs</div>
+        </div>
+        <div style="flex:1;min-width:130px;background:var(--surface2);border-radius:var(--radius-sm);padding:10px">
+          <div style="font-size:10.5px;color:var(--text3)">Sueldo simulado / mes</div>
+          <div style="font-size:15px;font-weight:700;color:var(--accent)">${fmt(sueldoMes)}</div>
+        </div>
+      </div>
+
+      ${comparaciones.length === 0
+        ? `<div class="empty-state" style="padding:12px 0"><p style="font-size:12px">Cargá recetas con precio en catálogo para ver la comparación de márgenes</p></div>`
+        : `<div style="font-size:10.5px;color:var(--text3);margin-bottom:4px">Margen actual (solo materia prima) → margen con sueldo simulado sumado</div>${filaCompara}`
+      }
+    </div>
   `;
 }
 
@@ -5778,8 +6169,9 @@ function renderBarChartFinanzas(semanas) {
 
 function finanzaCardMini(m) {
   const gananciaPesos = m.tipo === 'income' ? gananciaPesosMovimiento(m) : null;
+  const gananciaPct = m.tipo === 'income' ? gananciaPctMovimiento(m) : null;
   const gananciaTxt = gananciaPesos !== null
-    ? ` <span style="font-weight:600;color:${gananciaPesos >= 0 ? 'var(--green)' : 'var(--red)'}">(${gananciaPesos >= 0 ? '+' : ''}${fmt(gananciaPesos)})</span>`
+    ? ` <span style="font-weight:600;color:${gananciaPesos >= 0 ? 'var(--green)' : 'var(--red)'}">(${gananciaPct !== null ? `${gananciaPct >= 0 ? '+' : ''}${gananciaPct}% · ` : ''}${gananciaPesos >= 0 ? '+' : ''}${fmt(gananciaPesos)})</span>`
     : '';
   return `
     <div class="anim-in" onclick="event.stopPropagation();openEditMovimiento(${m.id})"
@@ -5819,8 +6211,9 @@ function gananciaPesosMovimiento(m) {
 
 function finanzaItem(m) {
   const gananciaPesos = m.tipo === 'income' ? gananciaPesosMovimiento(m) : null;
+  const gananciaPct = m.tipo === 'income' ? gananciaPctMovimiento(m) : null;
   const gananciaTxt = gananciaPesos !== null
-    ? ` <span style="font-weight:600;color:${gananciaPesos >= 0 ? 'var(--green)' : 'var(--red)'}">(${gananciaPesos >= 0 ? '+' : ''}${fmt(gananciaPesos)})</span>`
+    ? ` <span style="font-weight:600;color:${gananciaPesos >= 0 ? 'var(--green)' : 'var(--red)'}">(${gananciaPct !== null ? `${gananciaPct >= 0 ? '+' : ''}${gananciaPct}% · ` : ''}${gananciaPesos >= 0 ? '+' : ''}${fmt(gananciaPesos)})</span>`
     : '';
   return `
     <div class="finance-item anim-in" style="cursor:pointer" onclick="openEditMovimiento(${m.id})">

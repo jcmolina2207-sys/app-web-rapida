@@ -4626,6 +4626,28 @@ function saveIngrediente(id) {
     costoUnitario,
   };
 
+  // Si es un ingrediente nuevo y ya existe otro con el mismo nombre (ignorando
+  // tildes/mayúsculas), avisar antes de crear el duplicado. No bloquea: a veces
+  // es intencional (ej. "Harina 0000" vs "Harina leudante"), pero un duplicado
+  // con nombre idéntico y costo distinto es justo lo que rompe el cálculo de
+  // recetas (dos ingredientes iguales a los ojos de Sofía, distintos por dentro).
+  if (!id) {
+    const nombreNorm = normalizarTexto(nombre);
+    const posibleDuplicado = state.ingredientes.find(i => normalizarTexto(i.nombre) === nombreNorm);
+    if (posibleDuplicado) {
+      showConfirm(
+        '⚠️ Ya existe un ingrediente con ese nombre',
+        `Ya tenés "${posibleDuplicado.nombre}" cargado (costo: ${posibleDuplicado.costoUnitario ? fmt(posibleDuplicado.costoUnitario) + '/' + posibleDuplicado.unidad : 'sin cargar'}). Si creás uno nuevo con el mismo nombre, las recetas pueden terminar usando el ingrediente equivocado y el costo va a salir mal. ¿Crear igual?`,
+        () => guardarIngredienteFinal(id, nombre, data, costo)
+      );
+      return;
+    }
+  }
+
+  guardarIngredienteFinal(id, nombre, data, costo);
+}
+
+function guardarIngredienteFinal(id, nombre, data, costo) {
   if (id) {
     const idx = state.ingredientes.findIndex(i => i.id === id);
     state.ingredientes[idx] = { ...state.ingredientes[idx], ...data };
@@ -5363,6 +5385,17 @@ function datosFaltantesReceta(receta) {
   const faltan = [];
   if (!receta.rinde) faltan.push('rinde de la receta');
   if (!receta.ingredientes || receta.ingredientes.length === 0) faltan.push('ingredientes cargados');
+  // calcularCostoReceta suma como $0 cualquier ingrediente sin costoUnitario cargado
+  // (o ya eliminado de Stock), lo que puede mostrar un margen "válido" pero falso.
+  // Acá lo detectamos para avisar en vez de calcular en silencio.
+  (receta.ingredientes || []).forEach(ri => {
+    const ing = state.ingredientes.find(i => i.id === ri.ingId);
+    if (!ing) {
+      faltan.push(`un ingrediente eliminado de Stock (id ${ri.ingId})`);
+    } else if (!ing.costoUnitario) {
+      faltan.push(`costo de "${ing.nombre}"`);
+    }
+  });
   return faltan;
 }
 

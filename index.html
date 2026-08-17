@@ -6476,6 +6476,9 @@ function renderReportes() {
 // de state.config.reparto (configurables desde openConfigReparto()).
 // ------------------------------------------------------------------
 function renderReporteReparto() {
+  // Se recalcula desde state.movimientos en cada render de Finanzas
+  // (que ya corre reconciliarMovimientosDesdeEntregados() antes), así que
+  // esta lista siempre refleja los pedidos entregados más recientes.
   const ingresos = state.movimientos
     .filter(m => m.tipo === 'income')
     .sort((a, b) => b.fecha.localeCompare(a.fecha) || b.id - a.id)
@@ -6501,22 +6504,33 @@ function renderReporteReparto() {
     { key: 'colchon',      label: '🛟 Colchón / imprevistos',    color: 'var(--text3)' },
   ];
 
-  const desglose = !movSel ? '' : partidas.map(p => {
-    const pct = r[p.key] || 0;
-    const monto = Math.round(movSel.monto * pct / 100);
-    return `
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-        <div style="flex:1;min-width:0">
-          <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;margin-bottom:4px">
-            <span style="font-weight:700;color:var(--text)">${p.label}</span>
-            <span style="font-weight:700;color:var(--text)">${fmt(monto)} <span style="color:var(--text3);font-weight:600">(${pct}%)</span></span>
+  // Arma el desglose (barras) del reparto para un monto dado.
+  function desgloseDe(monto) {
+    return partidas.map(p => {
+      const pct = r[p.key] || 0;
+      const parte = Math.round(monto * pct / 100);
+      return `
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;margin-bottom:4px">
+              <span style="font-weight:700;color:var(--text)">${p.label}</span>
+              <span style="font-weight:700;color:var(--text)">${fmt(parte)} <span style="color:var(--text3);font-weight:600">(${pct}%)</span></span>
+            </div>
+            <div style="background:var(--surface2);border-radius:6px;height:7px;overflow:hidden">
+              <div style="width:${Math.max(2, pct)}%;height:100%;background:${p.color};border-radius:6px"></div>
+            </div>
           </div>
-          <div style="background:var(--surface2);border-radius:6px;height:7px;overflow:hidden">
-            <div style="width:${Math.max(2, pct)}%;height:100%;background:${p.color};border-radius:6px"></div>
-          </div>
-        </div>
-      </div>`;
-  }).join('');
+        </div>`;
+    }).join('');
+  }
+
+  const desglose = !movSel ? '' : desgloseDe(movSel.monto);
+
+  // Total de TODOS los ingresos registrados (suma de todos los pedidos
+  // ya reflejados en Finanzas) — misma base que usa el resumen de arriba
+  // (Saldo/Ingresos). Se muestra siempre, sin necesidad de elegir uno.
+  const totalTodos = totalIngresos();
+  const desgloseTotal = desgloseDe(totalTodos);
 
   return `
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-top:12px;box-shadow:var(--shadow)">
@@ -6524,8 +6538,20 @@ function renderReporteReparto() {
         <div style="font-weight:700;font-size:14px;color:var(--text)">💡 ¿Qué hacer con este ingreso?</div>
         <button class="btn btn-ghost btn-sm" onclick="openConfigReparto()">⚙️ Configurar</button>
       </div>
-      <div style="font-size:11px;color:var(--text3);margin-bottom:12px">Sugerencia de distribución sobre un ingreso puntual — es sólo una guía, no genera movimientos ni modifica el saldo real.</div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:12px">Sugerencia de distribución — es sólo una guía, no genera movimientos ni modifica el saldo real.</div>
 
+      <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:10px 10px 4px;margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px">
+          <div style="font-size:12.5px;font-weight:700;color:var(--text)">📦 Total de todos los ingresos</div>
+          <div style="font-size:14px;font-weight:700;color:var(--text)">${fmt(totalTodos)}</div>
+        </div>
+        ${totalTodos === 0
+          ? `<div style="font-size:11.5px;color:var(--text3);padding-bottom:6px">Todavía no hay ingresos registrados</div>`
+          : desgloseTotal
+        }
+      </div>
+
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">O elegí un ingreso puntual</div>
       ${ingresos.length === 0
         ? `<div class="empty-state" style="padding:12px 0"><p style="font-size:12px">Todavía no hay ingresos registrados</p></div>`
         : `

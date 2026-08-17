@@ -2866,7 +2866,7 @@ function buscarDuplicadosHtml() {
 function confirmEliminarDuplicadosSeleccionados() {
   const total = _dupSeleccion.size;
   if (total === 0) return;
-  showConfirm('¿Eliminar duplicados?', `Se eliminarán ${total} registro${total !== 1 ? 's' : ''} de forma permanente. Esta acción no se puede deshacer.`, async () => {
+  showConfirm('¿Eliminar duplicados?', `Se eliminarán ${total} registro${total !== 1 ? 's' : ''} de forma permanente. Esta acción no se puede deshacer.`, () => {
     const idsPedidos = [];
     const idsMovs = [];
     _dupSeleccion.forEach(key => {
@@ -2877,21 +2877,21 @@ function confirmEliminarDuplicadosSeleccionados() {
       else idsMovs.push(id);
     });
 
-    // Pedidos: misma lógica que confirmEliminarPedido (revertir stock si ya estaba descontado).
-    for (const id of idsPedidos) {
+    // 1) Todo lo LOCAL primero (sync, sin esperar red) para que la UI
+    // se actualice al toque con los 5/10/lo que sea de una — igual que
+    // hace confirmEliminarPedido/confirmEliminarMovimiento con 1 solo item.
+    idsPedidos.forEach(id => {
       const pedido = state.pedidos.find(p => p.id === id);
-      if (!pedido) continue;
+      if (!pedido) return;
       const huboDescuento = pedido.stockDescontado && pedido.stockDetalle && pedido.stockDetalle.length > 0;
       if (huboDescuento) {
         revertirMateriaPrimaByPedido(pedido.stockDetalle);
         persistIngredientesPorIds(pedido.stockDetalle.map(d => d.ingId));
       }
-      state.pedidos = state.pedidos.filter(p => p.id !== id);
-      await removeItem('pedidos', id);
-    }
+    });
+    state.pedidos = state.pedidos.filter(p => !idsPedidos.includes(p.id));
 
-    // Movimientos: misma lógica que confirmEliminarMovimiento (avisar al pedido si era el ingreso auto).
-    for (const id of idsMovs) {
+    idsMovs.forEach(id => {
       const m = state.movimientos.find(x => x.id === id);
       if (m && m.auto && m.pedidoId) {
         const pedido = state.pedidos.find(p => p.id === m.pedidoId);
@@ -2900,15 +2900,28 @@ function confirmEliminarDuplicadosSeleccionados() {
           persistItem('pedidos', pedido);
         }
       }
-      state.movimientos = state.movimientos.filter(x => x.id !== id);
-      await removeItem('movimientos', id);
-    }
+    });
+    state.movimientos = state.movimientos.filter(x => !idsMovs.includes(x.id));
 
-    saveState();
     _dupSeleccion = new Set();
     closeModal();
     renderScreen(activeScreen);
-    showToast(`🗑 ${total} duplicado${total !== 1 ? 's' : ''} eliminado${total !== 1 ? 's' : ''}`);
+    saveState();
+    showToast(`🗑 Eliminando ${total} duplicado${total !== 1 ? 's' : ''}...`);
+
+    // 2) Confirmar el borrado en Firestore EN PARALELO, en segundo plano.
+    // La UI ya quedó actualizada arriba, así que esto no bloquea nada.
+    Promise.all([
+      ...idsPedidos.map(id => removeItem('pedidos', id)),
+      ...idsMovs.map(id => removeItem('movimientos', id)),
+    ]).then(resultados => {
+      const fallidos = resultados.filter(ok => !ok).length;
+      showToast(
+        fallidos > 0
+          ? `🗑 ${total - fallidos} eliminados · ${fallidos} se sincronizarán después`
+          : `🗑 ${total} duplicado${total !== 1 ? 's' : ''} eliminado${total !== 1 ? 's' : ''}`
+      );
+    });
   });
 }
 

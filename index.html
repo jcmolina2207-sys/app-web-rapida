@@ -1308,6 +1308,11 @@ let state = {
     },
   },
   nextId: 1,
+  // Registro de borrados intencionales: { [colName]: { [docId]: tsBorrado } }.
+  // Evita que un documento borrado "resucite" al mergear con Firestore si el
+  // delete no llegó a confirmarse a tiempo (recarga rápida, corte de red,
+  // otro dispositivo con caché vieja, etc.). Ver mergeCollection().
+  tombstones: {},
 };
 
 let _nextIdFromDB = 1;
@@ -1369,19 +1374,83 @@ async function persistItem(colName, item, customDocId) {
   localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
 }
 
+// Registra que un documento fue borrado A PROPÓSITO. Esto es lo que le
+// permite a mergeCollection() (carga inicial) y al listener en tiempo real
+// distinguir "nunca llegó a sincronizarse" de "lo borré yo", y no revivirlo.
+function recordTombstone(colName, docId) {
+  state.tombstones = state.tombstones || {};
+  state.tombstones[colName] = state.tombstones[colName] || {};
+  state.tombstones[colName][docId] = Date.now();
+  saveTombstones();
+}
+
+// Persiste el registro de borrados en Firestore (app/tombstones) para que
+// TODOS los dispositivos respeten el mismo borrado, no solo el que lo hizo.
+async function saveTombstones() {
+  try {
+    await db.collection('app').doc('tombstones').set(state.tombstones || {});
+  } catch (e) {
+    console.error('Error guardando tombstones', e);
+  }
+}
+
+// Combina los tombstones locales con los que bajaron de Firestore, quedándose
+// con el timestamp más reciente por documento (por si dos dispositivos
+// borraron cosas distintas offline).
+function mergeTombstones(local, remote) {
+  const out = {};
+  const colNames = new Set([...Object.keys(local || {}), ...Object.keys(remote || {})]);
+  colNames.forEach(col => {
+    out[col] = { ...(remote && remote[col]), };
+    const localCol = (local && local[col]) || {};
+    Object.keys(localCol).forEach(docId => {
+      if (!out[col][docId] || localCol[docId] > out[col][docId]) {
+        out[col][docId] = localCol[docId];
+      }
+    });
+  });
+  return out;
+}
+
+// Descarta tombstones viejos (>90 días) para que app/tombstones no crezca
+// sin límite. Un documento borrado hace más de 90 días ya no corre riesgo
+// real de "resucitar" por una sincronización atrasada.
+function pruneTombstones() {
+  const LIMITE_MS = 90 * 24 * 60 * 60 * 1000;
+  const ahora = Date.now();
+  let huboCambios = false;
+  Object.keys(state.tombstones || {}).forEach(col => {
+    Object.keys(state.tombstones[col]).forEach(docId => {
+      if (ahora - state.tombstones[col][docId] > LIMITE_MS) {
+        delete state.tombstones[col][docId];
+        huboCambios = true;
+      }
+    });
+  });
+  return huboCambios;
+}
+
 // Elimina UN SOLO documento. Para catálogo, pasar customDocId=catalogoDocId(nombre)
 // y id=null; para el resto, pasar el id numérico normal.
+// Devuelve true/false según si el borrado en Firestore se confirmó.
 async function removeItem(colName, id, customDocId) {
   const docId = customDocId || String(id);
+  // Se registra el tombstone ANTES del intento de red: aunque el delete
+  // falle o no llegue a tiempo, el documento queda oculto para siempre en
+  // esta app (y se reintenta el borrado remoto en la próxima carga).
+  recordTombstone(colName, docId);
   setSyncStatus('saving');
+  let ok = true;
   try {
     await db.collection(colName).doc(docId).delete();
     setSyncStatus('ok');
   } catch (e) {
     console.error(`Error eliminando ${colName}/${docId}`, e);
     setSyncStatus('error');
+    ok = false;
   }
   localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
+  return ok;
 }
 
 async function saveNextId(id) {
@@ -1461,7 +1530,13 @@ function parsePrecio(val) {
 // usando _ts para decidir cuál versión de cada registro es más nueva.
 // Los items que ganan por ser más nuevos localmente se re-suben a Firestore
 // (por si la escritura anterior no había llegado a confirmarse).
-function mergeCollection(colName, localArr, remoteDocs) {
+//
+// `tombstones` es el mapa { docId: tsBorrado } de ESTA colección. Si un
+// documento tiene tombstone y no fue editado (local o remoto) después de esa
+// fecha de borrado, se lo descarta en vez de resucitarlo — y si todavía
+// existe en Firestore, se marca para reintentar su borrado (aBorrarEnRemoto).
+function mergeCollection(colName, localArr, remoteDocs, tombstones) {
+  tombstones = tombstones || {};
   const remoteById = new Map();
   remoteDocs.forEach(d => remoteById.set(d.id, d.data()));
 
@@ -1470,11 +1545,28 @@ function mergeCollection(colName, localArr, remoteDocs) {
 
   const merged = [];
   const aRepushear = [];
+  const aBorrarEnRemoto = [];
   const allIds = new Set([...remoteById.keys(), ...localById.keys()]);
 
   allIds.forEach(docId => {
     const remote = remoteById.get(docId);
     const local = localById.get(docId);
+    const tsBorrado = tombstones[docId];
+
+    if (tsBorrado) {
+      const remoteEsPosterior = remote && (remote._ts || 0) > tsBorrado;
+      const localEsPosterior = local && (local._ts || 0) > tsBorrado;
+      if (!remoteEsPosterior && !localEsPosterior) {
+        // Se borró a propósito y nadie lo volvió a editar después: no se
+        // resucita. Si Firestore todavía lo tiene, se reintenta el borrado.
+        if (remote) aBorrarEnRemoto.push(docId);
+        return;
+      }
+      // Si hay una edición posterior al borrado (caso raro: se borró en un
+      // dispositivo y se editó en otro antes de enterarse), gana la edición
+      // y sigue el flujo normal de abajo.
+    }
+
     if (remote && local) {
       if ((local._ts || 0) > (remote._ts || 0)) {
         merged.push(local);
@@ -1493,7 +1585,7 @@ function mergeCollection(colName, localArr, remoteDocs) {
     }
   });
 
-  return { merged, aRepushear };
+  return { merged, aRepushear, aBorrarEnRemoto };
 }
 
 // Load all data from Firestore on startup (lee cada subcolección documento por documento)
@@ -1521,13 +1613,26 @@ async function loadFromFirebase() {
     );
     const metaDoc = await db.collection('app').doc('meta').get();
     const configDoc = await db.collection('app').doc('config').get();
+    const tombstonesDoc = await db.collection('app').doc('tombstones').get();
+
+    if (tombstonesDoc.exists) {
+      state.tombstones = mergeTombstones(state.tombstones, tombstonesDoc.data());
+    }
 
     SYNCED_COLLECTIONS.forEach((c, i) => {
-      const { merged, aRepushear } = mergeCollection(c, state[c], results[i].docs);
+      const { merged, aRepushear, aBorrarEnRemoto } = mergeCollection(
+        c, state[c], results[i].docs, (state.tombstones || {})[c]
+      );
       state[c] = merged;
       if (c === 'pedidos') state.pedidos.forEach(normalizarPedido);
       aRepushear.forEach(item => persistItem(c, item));
+      // Documentos con tombstone que seguían en Firestore (el borrado
+      // original no se había confirmado): se reintenta el borrado ahora.
+      aBorrarEnRemoto.forEach(docId => db.collection(c).doc(docId).delete().catch(() => {}));
     });
+
+    pruneTombstones();
+    saveTombstones();
 
     if (metaDoc.exists) {
       state.nextId = metaDoc.data().nextId || 1;
@@ -1620,6 +1725,15 @@ function setupRealtimeSync() {
         if (change.type === 'removed') {
           if (idx >= 0) arr.splice(idx, 1);
         } else { // 'added' o 'modified'
+          const tsBorrado = ((state.tombstones || {})[colName] || {})[change.doc.id];
+          if (tsBorrado && (data._ts || 0) <= tsBorrado) {
+            // Este doc fue borrado a propósito y lo que llegó por el listener
+            // es más viejo que ese borrado (eco de una escritura atrasada,
+            // o un repush desde otro dispositivo con caché vieja): se ignora.
+            if (idx >= 0) arr.splice(idx, 1);
+            db.collection(colName).doc(change.doc.id).delete().catch(() => {});
+            return;
+          }
           if (colName === 'pedidos') normalizarPedido(data);
           if (idx >= 0) {
             const localTs = arr[idx]._ts || 0;
@@ -2478,6 +2592,8 @@ function openPedidoDetalle(id) {
 // No duplica: si ya existe un movimiento auto ligado a ese pedido, no hace nada.
 function generarIngresoAutoSiEntregado(p) {
   if (!p || p.estado !== 'done') return null;
+  // Se borró a propósito el ingreso automático de este pedido: no se regenera.
+  if (p.sinIngresoAuto) return null;
   const yaExiste = state.movimientos.some(m => m.auto && m.pedidoId === p.id);
   if (yaExiste) return null;
   const nuevoMov = {
@@ -2582,7 +2698,7 @@ function togglePagoCompletoPedido(id, checked) {
 }
 
 function confirmEliminarPedido(id) {
-  showConfirm('¿Eliminar pedido?', 'Esta acción no se puede deshacer.', () => {
+  showConfirm('¿Eliminar pedido?', 'Esta acción no se puede deshacer.', async () => {
     const pedido = state.pedidos.find(p => p.id === id);
     // Solo hay stock que devolver si este pedido llegó a descontarlo (es
     // decir, si ya figuraba como Entregado). Un pedido pendiente/en
@@ -2593,10 +2709,18 @@ function confirmEliminarPedido(id) {
       persistIngredientesPorIds(pedido.stockDetalle.map(d => d.ingId));
     }
     state.pedidos = state.pedidos.filter(p => p.id !== id);
-    removeItem('pedidos', id);
-    saveState(); closeModal();
-    showToast(huboDescuento ? 'Pedido eliminado · stock repuesto' : 'Pedido eliminado');
+    closeModal();
     renderScreen(activeScreen);
+    // El tombstone (dentro de removeItem) ya protege contra que el pedido
+    // "resucite" aunque el borrado remoto tarde o falle; el toast solo
+    // informa si además se confirmó contra Firestore.
+    const ok = await removeItem('pedidos', id);
+    saveState();
+    showToast(
+      huboDescuento
+        ? (ok ? 'Pedido eliminado · stock repuesto' : 'Pedido eliminado localmente · se sincronizará · stock repuesto')
+        : (ok ? 'Pedido eliminado' : 'Pedido eliminado localmente · se sincronizará')
+    );
   });
 }
 
@@ -6325,12 +6449,24 @@ function saveEditMovimiento(id) {
 
 function confirmEliminarMovimiento(id) {
   const m = state.movimientos.find(x => x.id === id);
-  showConfirm('¿Eliminar movimiento?', `Se eliminará "${m.descripcion}" de forma permanente.`, () => {
+  showConfirm('¿Eliminar movimiento?', `Se eliminará "${m.descripcion}" de forma permanente.`, async () => {
+    // Si es el ingreso automático de un pedido Entregado, hay que avisarle
+    // al pedido que no lo vuelva a generar solo (ver generarIngresoAutoSiEntregado).
+    // Si no hiciéramos esto, reconciliarMovimientosDesdeEntregados() lo iba a
+    // recrear en la próxima carga o sync, porque el pedido sigue Entregado.
+    if (m && m.auto && m.pedidoId) {
+      const pedido = state.pedidos.find(p => p.id === m.pedidoId);
+      if (pedido) {
+        pedido.sinIngresoAuto = true;
+        persistItem('pedidos', pedido);
+      }
+    }
     state.movimientos = state.movimientos.filter(x => x.id !== id);
-    removeItem('movimientos', id);
-    saveState(); closeModal();
-    showToast('🗑 Movimiento eliminado');
+    closeModal();
     renderScreen(activeScreen);
+    const ok = await removeItem('movimientos', id);
+    saveState();
+    showToast(ok ? '🗑 Movimiento eliminado' : '🗑 Movimiento eliminado localmente · se sincronizará');
   });
 }
 

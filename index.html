@@ -5405,13 +5405,18 @@ function renderMargenBadgeReceta(receta) {
   const faltantes = datosFaltantesReceta(receta);
   const m = calcularMargenProducto(receta.producto);
 
-  if (!m || m.sinReceta || m.margenPct === null || faltantes.length > 0) {
+  if (!m || m.sinReceta || m.margenPct === null) {
     return `<span class="receta-margen" style="font-size:12px;font-weight:600;color:var(--text3);cursor:pointer" onclick="openMargenRecetaModal('${nombreEscapado}')">(sin datos de costo)</span>`;
   }
   const positivo = m.margenPct >= 0;
-  const color = positivo ? 'var(--green)' : 'var(--red)';
+  const incompleto = faltantes.length > 0;
+  // Con datos incompletos (ej. falta el costo de algún ingrediente en Stock) igual mostramos
+  // el % calculado -- no queremos bloquear el número solo porque Sofía todavía no actualizó
+  // materia prima -- pero lo marcamos en amarillo/⚠️ para dejar claro que puede estar inflado.
+  const color = incompleto ? 'var(--yellow)' : (positivo ? 'var(--green)' : 'var(--red)');
   const signo = positivo ? '+' : '';
-  return `<span class="receta-margen" style="font-size:12px;font-weight:600;color:${color};cursor:pointer" onclick="openMargenRecetaModal('${nombreEscapado}')">(${signo}${Math.round(m.margenPct)}% · ${fmt(m.margen)})</span>`;
+  const prefijo = incompleto ? '⚠️ ' : '';
+  return `<span class="receta-margen" style="font-size:12px;font-weight:600;color:${color};cursor:pointer" onclick="openMargenRecetaModal('${nombreEscapado}')">(${prefijo}${signo}${Math.round(m.margenPct)}% · ${fmt(m.margen)})</span>`;
 }
 
 // Modal con el detalle del costo real vs. precio de UNA receta (reemplaza a la vista comparativa global)

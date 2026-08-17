@@ -2360,7 +2360,8 @@ function renderPedidos() {
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
       <div class="section-sub" style="margin-bottom:0">${state.pedidos.length} pedido${state.pedidos.length !== 1 ? 's' : ''} en total</div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="openBuscarDuplicados('pedidos')">🔍 Duplicados</button>
         <button class="btn btn-secondary btn-sm" onclick="openImportarPedidoModal()">📥 Importar</button>
         <button class="btn btn-primary btn-sm" onclick="_bloqueImportadoIdxActual=null;openPedidoForm(null)">+ Nuevo</button>
       </div>
@@ -2721,6 +2722,193 @@ function confirmEliminarPedido(id) {
         ? (ok ? 'Pedido eliminado · stock repuesto' : 'Pedido eliminado localmente · se sincronizará · stock repuesto')
         : (ok ? 'Pedido eliminado' : 'Pedido eliminado localmente · se sincronizará')
     );
+  });
+}
+
+/* ============================================================
+   BUSCAR DUPLICADOS (pedidos y movimientos)
+   Agrupa por clave "parecida" (cliente/descripción + fecha + monto)
+   y deja tildar cuáles borrar. Por defecto se tilda para eliminar
+   todo el grupo MENOS el registro más viejo (id más bajo).
+============================================================ */
+function claveDuplicadoPedido(p) {
+  return [
+    normalizarTexto((p.cliente || '').trim()),
+    p.fechaEntrega || '',
+    normalizarTexto((p.producto || '').trim()),
+    Math.round(p.precio || 0),
+  ].join('|');
+}
+function claveDuplicadoMovimiento(m) {
+  return [
+    m.tipo || '',
+    normalizarTexto((m.descripcion || '').trim()),
+    Math.round(m.monto || 0),
+    m.fecha || '',
+  ].join('|');
+}
+function agruparDuplicados(lista, claveFn) {
+  const grupos = {};
+  lista.forEach(item => {
+    const k = claveFn(item);
+    if (!grupos[k]) grupos[k] = [];
+    grupos[k].push(item);
+  });
+  return Object.values(grupos)
+    .filter(g => g.length > 1)
+    .map(g => [...g].sort((a, b) => a.id - b.id)); // más viejo primero
+}
+function pedidosDuplicadosGrupos() {
+  return agruparDuplicados(state.pedidos, claveDuplicadoPedido);
+}
+function movimientosDuplicadosGrupos() {
+  return agruparDuplicados(state.movimientos, claveDuplicadoMovimiento);
+}
+
+let _dupTab = 'pedidos';
+let _dupSeleccion = new Set(); // claves 'p-<id>' / 'm-<id>'
+
+function openBuscarDuplicados(tabInicial) {
+  _dupTab = tabInicial || 'pedidos';
+  _dupSeleccion = new Set();
+  // Preselección práctica: en cada grupo se tilda todo menos el más viejo.
+  pedidosDuplicadosGrupos().forEach(g => g.slice(1).forEach(p => _dupSeleccion.add('p-' + p.id)));
+  movimientosDuplicadosGrupos().forEach(g => g.slice(1).forEach(m => _dupSeleccion.add('m-' + m.id)));
+  openModal(buscarDuplicadosHtml());
+}
+function setDupTab(tab) {
+  _dupTab = tab;
+  openModal(buscarDuplicadosHtml());
+}
+function toggleDupSeleccion(key, checked) {
+  if (checked) _dupSeleccion.add(key); else _dupSeleccion.delete(key);
+  const btn = document.getElementById('dup-btn-eliminar');
+  if (btn) {
+    btn.textContent = `🗑 Eliminar seleccionados (${_dupSeleccion.size})`;
+    btn.disabled = _dupSeleccion.size === 0;
+  }
+}
+
+function buscarDuplicadosHtml() {
+  const gruposPedidos = pedidosDuplicadosGrupos();
+  const gruposMovs = movimientosDuplicadosGrupos();
+
+  function filaPedido(p) {
+    const key = 'p-' + p.id;
+    const checked = _dupSeleccion.has(key);
+    return `
+      <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:var(--radius-sm);
+        border:1px solid var(--border);margin-bottom:6px;cursor:pointer;background:var(--surface)">
+        <input type="checkbox" style="margin-top:3px" ${checked ? 'checked' : ''} onchange="toggleDupSeleccion('${key}', this.checked)">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:700;color:var(--text)">${p.cliente || '(sin cliente)'} · ${fmt(p.precio || 0)}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">${p.producto || ''}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">
+            ${fmtDate(p.fechaEntrega)} ${p.hora || ''} · <span class="badge ${estadoBadge(p.estado)}" style="font-size:10px">${estadoLabel(p.estado)}</span> · id #${p.id}
+          </div>
+        </div>
+      </label>`;
+  }
+  function filaMovimiento(m) {
+    const key = 'm-' + m.id;
+    const checked = _dupSeleccion.has(key);
+    return `
+      <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:var(--radius-sm);
+        border:1px solid var(--border);margin-bottom:6px;cursor:pointer;background:var(--surface)">
+        <input type="checkbox" style="margin-top:3px" ${checked ? 'checked' : ''} onchange="toggleDupSeleccion('${key}', this.checked)">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:700;color:${m.tipo === 'income' ? 'var(--green)' : 'var(--red)'}">${m.tipo === 'income' ? '⬆️' : '⬇️'} ${fmt(m.monto)}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">${m.descripcion || ''}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">
+            ${fmtDate(m.fecha)} ${m.auto ? '· 🔄 auto' : ''} · id #${m.id}
+          </div>
+        </div>
+      </label>`;
+  }
+  function bloqueGrupos(grupos, filaFn, tipoLabel) {
+    if (grupos.length === 0) {
+      return `<div class="empty-state"><div class="empty-icon">✅</div><p>No se encontraron ${tipoLabel} duplicados</p></div>`;
+    }
+    return grupos.map((g, i) => `
+      <div style="margin-bottom:16px">
+        <div style="font-size:11px;font-weight:700;color:var(--accent);margin-bottom:6px;text-transform:uppercase;letter-spacing:.3px">
+          Grupo ${i + 1} · ${g.length} coincidencias
+        </div>
+        ${g.map(item => filaFn(item)).join('')}
+      </div>`).join('');
+  }
+
+  return `
+    <div class="modal-title">🔍 Buscar duplicados</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:14px">
+      Se agrupan por cliente/descripción, fecha y monto iguales. Por defecto queda tildado para borrar todo menos el más antiguo de cada grupo — revisá antes de confirmar.
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:14px">
+      <div onclick="setDupTab('pedidos')" style="flex:1;text-align:center;padding:8px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;
+        border:2px solid ${_dupTab === 'pedidos' ? 'var(--accent)' : 'var(--border)'};
+        background:${_dupTab === 'pedidos' ? 'var(--accent-light)' : 'var(--surface)'};
+        color:${_dupTab === 'pedidos' ? 'var(--accent)' : 'var(--text2)'}">📦 Pedidos${gruposPedidos.length ? ` (${gruposPedidos.length})` : ''}</div>
+      <div onclick="setDupTab('movimientos')" style="flex:1;text-align:center;padding:8px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;
+        border:2px solid ${_dupTab === 'movimientos' ? 'var(--accent)' : 'var(--border)'};
+        background:${_dupTab === 'movimientos' ? 'var(--accent-light)' : 'var(--surface)'};
+        color:${_dupTab === 'movimientos' ? 'var(--accent)' : 'var(--text2)'}">💰 Movimientos${gruposMovs.length ? ` (${gruposMovs.length})` : ''}</div>
+    </div>
+    <div style="max-height:45vh;overflow-y:auto;padding-right:2px">
+      ${_dupTab === 'pedidos' ? bloqueGrupos(gruposPedidos, filaPedido, 'pedidos') : bloqueGrupos(gruposMovs, filaMovimiento, 'movimientos')}
+    </div>
+    <div class="modal-actions" style="flex-direction:column;gap:8px;margin-top:16px">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cerrar</button>
+      <button class="btn btn-danger w-100" id="dup-btn-eliminar" ${_dupSeleccion.size === 0 ? 'disabled' : ''} onclick="confirmEliminarDuplicadosSeleccionados()">🗑 Eliminar seleccionados (${_dupSeleccion.size})</button>
+    </div>
+  `;
+}
+
+function confirmEliminarDuplicadosSeleccionados() {
+  const total = _dupSeleccion.size;
+  if (total === 0) return;
+  showConfirm('¿Eliminar duplicados?', `Se eliminarán ${total} registro${total !== 1 ? 's' : ''} de forma permanente. Esta acción no se puede deshacer.`, async () => {
+    const idsPedidos = [];
+    const idsMovs = [];
+    _dupSeleccion.forEach(key => {
+      const idx = key.indexOf('-');
+      const tipo = key.slice(0, idx);
+      const id = Number(key.slice(idx + 1));
+      if (tipo === 'p') idsPedidos.push(id);
+      else idsMovs.push(id);
+    });
+
+    // Pedidos: misma lógica que confirmEliminarPedido (revertir stock si ya estaba descontado).
+    for (const id of idsPedidos) {
+      const pedido = state.pedidos.find(p => p.id === id);
+      if (!pedido) continue;
+      const huboDescuento = pedido.stockDescontado && pedido.stockDetalle && pedido.stockDetalle.length > 0;
+      if (huboDescuento) {
+        revertirMateriaPrimaByPedido(pedido.stockDetalle);
+        persistIngredientesPorIds(pedido.stockDetalle.map(d => d.ingId));
+      }
+      state.pedidos = state.pedidos.filter(p => p.id !== id);
+      await removeItem('pedidos', id);
+    }
+
+    // Movimientos: misma lógica que confirmEliminarMovimiento (avisar al pedido si era el ingreso auto).
+    for (const id of idsMovs) {
+      const m = state.movimientos.find(x => x.id === id);
+      if (m && m.auto && m.pedidoId) {
+        const pedido = state.pedidos.find(p => p.id === m.pedidoId);
+        if (pedido) {
+          pedido.sinIngresoAuto = true;
+          persistItem('pedidos', pedido);
+        }
+      }
+      state.movimientos = state.movimientos.filter(x => x.id !== id);
+      await removeItem('movimientos', id);
+    }
+
+    saveState();
+    _dupSeleccion = new Set();
+    closeModal();
+    renderScreen(activeScreen);
+    showToast(`🗑 ${total} duplicado${total !== 1 ? 's' : ''} eliminado${total !== 1 ? 's' : ''}`);
   });
 }
 
@@ -5879,7 +6067,10 @@ function renderFinanzas() {
   }
 
   el.innerHTML = `
-    <div class="section-sub" style="margin-bottom:12px">Resumen de tus ingresos y egresos</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px;flex-wrap:wrap">
+      <div class="section-sub" style="margin-bottom:0">Resumen de tus ingresos y egresos</div>
+      <button class="btn btn-ghost btn-sm" onclick="openBuscarDuplicados('movimientos')">🔍 Duplicados</button>
+    </div>
     <div class="summary-grid">
       <div class="summary-card">
         <div class="label">Saldo</div>

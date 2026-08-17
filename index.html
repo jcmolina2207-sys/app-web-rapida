@@ -5817,8 +5817,10 @@ function calcularCostoReceta(receta) {
   };
 }
 
-// Calcula la ganancia real de un pedido ya cerrado: precio cobrado - costo real de sus items
-function calcularGananciaPedido(p) {
+// Costo real (SOLO materia prima de las recetas, vía calcularCostoReceta) de
+// los items de un pedido puntual. No suma costos fijos, sueldo simulado ni
+// nada mensualizado — sólo lo que efectivamente se usó en esos items.
+function calcularCostoItemsPedido(p) {
   if (!p || !p.items || p.items.length === 0) return null;
   let costoTotal = 0;
   let algunaReceta = false;
@@ -5838,7 +5840,23 @@ function calcularGananciaPedido(p) {
     costoTotal += costoUnit * item.cantidad;
   });
   if (!algunaReceta) return null; // ningún item tiene receta cargada, no podemos calcular
-  return p.precio - costoTotal;
+  return costoTotal;
+}
+
+// Calcula la ganancia real de un pedido ya cerrado: monto cobrado en ESA
+// transacción puntual - costo real de insumos de sus items.
+// `monto` es opcional (default: p.precio) para no romper otros usos, pero
+// Finanzas > Lista/Reportes SIEMPRE debe pasar el monto propio del
+// movimiento (m.monto), no p.precio: si el pedido se edita después de que
+// el movimiento ya se generó (descuento, corrección de precio, etc.), el
+// movimiento queda con un monto fijo y su margen no debe arrastrar ese
+// cambio posterior — cada movimiento se mide contra lo que esa transacción
+// puntual realmente cobró y realmente costó en insumos, nada más.
+function calcularGananciaPedido(p, monto) {
+  const costoTotal = calcularCostoItemsPedido(p);
+  if (costoTotal === null) return null;
+  const base = monto !== undefined && monto !== null ? monto : p.precio;
+  return base - costoTotal;
 }
 
 // Compara costo real vs precio de catálogo para un producto
@@ -6201,22 +6219,16 @@ function renderFinanzas() {
     const fechas = Object.keys(grupos).sort((a,b) => b.localeCompare(a));
     return fechas.map(fecha => {
       const items = grupos[fecha];
-      const ingDia = items.filter(m=>m.tipo==='income').reduce((s,m)=>s+m.monto,0);
-      const egDia  = items.filter(m=>m.tipo==='expense').reduce((s,m)=>s+m.monto,0);
+      const resumenDia = gananciaResumenDia(items);
+      const { ingDia, egDia } = resumenDia;
       const saldoDia = ingDia - egDia;
       const expandido = finanzasDiaExpandido === fecha;
 
-      // Ganancia real del día: suma de (precio - costo materia prima) de los
-      // movimientos de ingreso que tienen pedido/receta cargada. Si ninguno
-      // tiene receta, no mostramos el dato en vez de inventar un número.
-      const ingresosConReceta = items.filter(m => m.tipo === 'income' && gananciaPesosMovimiento(m) !== null);
-      const gananciaDia = ingresosConReceta.reduce((s, m) => s + gananciaPesosMovimiento(m), 0);
-      const gananciaPctDia = ingresosConReceta.length > 0 && ingDia > 0
-        ? Math.round((gananciaDia / ingDia) * 100)
-        : null;
-      const gananciaTxt = gananciaPctDia !== null
-        ? ` <span style="font-weight:700;color:${gananciaDia>=0?'var(--green)':'var(--red)'};font-size:12px">${gananciaDia>=0?'+':''}${fmt(gananciaDia)} (${gananciaPctDia>=0?'+':''}${gananciaPctDia}%)</span>`
-        : '';
+      // Ganancia real del día: misma lógica/formato que la vista Calendario
+      // (gananciaResumenDia/gananciaResumenDiaTxt), para que el resumen del
+      // día sea idéntico en ambas vistas. Si ningún ingreso tiene receta
+      // cargada, no mostramos el dato en vez de inventar un número.
+      const gananciaTxt = gananciaResumenDiaTxt(resumenDia);
 
       return `
         <div style="margin-bottom:10px">
@@ -6326,8 +6338,12 @@ function renderFinanzasCalendario(movs) {
       .filter(m => m.fecha === fecha)
       .sort((a, b) => (a.descripcion || '').localeCompare(b.descripcion || ''));
     const esHoy = fecha === hoy;
-    const ingDia = movsDia.filter(m=>m.tipo==='income').reduce((s,m)=>s+m.monto,0);
-    const egDia  = movsDia.filter(m=>m.tipo==='expense').reduce((s,m)=>s+m.monto,0);
+    // Mismo cálculo/formato de ganancia agregada del día que usa "Por día"
+    // (gananciaResumenDia/gananciaResumenDiaTxt), para que el resumen que se
+    // ve arriba de cada columna sea consistente entre ambas vistas.
+    const resumenDia = gananciaResumenDia(movsDia);
+    const { ingDia, egDia } = resumenDia;
+    const gananciaTxtDia = gananciaResumenDiaTxt(resumenDia);
     return `
       <div>
         <div style="text-align:center;padding:8px 4px;border-radius:var(--radius-sm) var(--radius-sm) 0 0;
@@ -6338,7 +6354,8 @@ function renderFinanzasCalendario(movs) {
           ${movsDia.length > 0 ? `<div style="font-size:9px;margin-top:2px">
             ${ingDia > 0 ? `<span style="color:var(--green)">+${fmt(ingDia)}</span>` : ''}
             ${egDia > 0 ? ` <span style="color:var(--red)">-${fmt(egDia)}</span>` : ''}
-          </div>` : ''}
+          </div>
+          ${gananciaTxtDia ? `<div style="font-size:9px;margin-top:1px">${gananciaTxtDia}</div>` : ''}` : ''}
         </div>
         <div style="border:1px solid var(--border);border-radius:0 0 var(--radius-sm) var(--radius-sm);
           min-height:120px;padding:6px;display:flex;flex-direction:column;gap:6px;background:var(--surface)">
@@ -6703,11 +6720,7 @@ function renderBarChartFinanzas(semanas) {
 }
 
 function finanzaCardMini(m) {
-  const gananciaPesos = m.tipo === 'income' ? gananciaPesosMovimiento(m) : null;
-  const gananciaPct = m.tipo === 'income' ? gananciaPctMovimiento(m) : null;
-  const gananciaTxt = gananciaPesos !== null
-    ? ` <span style="font-weight:600;color:${gananciaPesos >= 0 ? 'var(--green)' : 'var(--red)'}">(${gananciaPct !== null ? `${gananciaPct >= 0 ? '+' : ''}${gananciaPct}% · ` : ''}${gananciaPesos >= 0 ? '+' : ''}${fmt(gananciaPesos)})</span>`
-    : '';
+  const gananciaTxt = gananciaTxtMovimiento(m);
   return `
     <div class="anim-in" onclick="event.stopPropagation();openEditMovimiento(${m.id})"
       style="cursor:pointer;background:var(--surface);border:1px solid var(--border);
@@ -6729,27 +6742,111 @@ function gananciaPctMovimiento(m) {
   if (!m.auto || !m.pedidoId) return null;
   const p = state.pedidos.find(x => x.id === m.pedidoId);
   if (!p) return null;
-  const ganancia = calcularGananciaPedido(p);
-  if (ganancia === null || !p.precio) return null;
-  return Math.round((ganancia / p.precio) * 100);
+  // Se compara contra m.monto (lo que ESTE movimiento efectivamente cobró),
+  // no contra p.precio: si el pedido se editó después de generado el
+  // movimiento, p.precio puede haber cambiado y ya no representa la plata
+  // real de esta transacción puntual.
+  const ganancia = calcularGananciaPedido(p, m.monto);
+  if (ganancia === null || !m.monto) return null;
+  return Math.round((ganancia / m.monto) * 100);
 }
 
 // Ganancia en pesos de un movimiento auto-generado por entrega de pedido
-// (precio cobrado - costo real de materia prima de sus items). Null si el
-// pedido no tiene ninguna receta cargada, o si no es un movimiento ligado a un pedido.
+// (monto cobrado en ESE movimiento - costo real de materia prima de sus
+// items). Null si el pedido no tiene ninguna receta cargada, o si no es un
+// movimiento ligado a un pedido.
 function gananciaPesosMovimiento(m) {
   if (!m.auto || !m.pedidoId) return null;
   const p = state.pedidos.find(x => x.id === m.pedidoId);
   if (!p) return null;
-  return calcularGananciaPedido(p);
+  return calcularGananciaPedido(p, m.monto);
+}
+
+// Explica por qué NO se pudo calcular el margen de un movimiento de ingreso,
+// para no ocultar el paréntesis en silencio. Reusa datosFaltantesReceta()
+// (misma lógica de diagnóstico que ya se usa en la vista de Costos).
+function motivoSinMargenMovimiento(m) {
+  if (!m.auto || !m.pedidoId) return 'Movimiento manual, sin pedido asociado';
+  const p = state.pedidos.find(x => x.id === m.pedidoId);
+  if (!p) return 'Pedido asociado no encontrado';
+  if (!p.items || p.items.length === 0) return 'Pedido sin items cargados';
+
+  const faltan = new Set();
+  p.items.forEach(item => {
+    const esItemPorcion = esPorcion(item.producto);
+    const nombreBase = esItemPorcion ? nombreBaseProducto(item.producto) : item.producto;
+    const receta = state.recetas.find(r => r.producto === nombreBase);
+    if (!receta) { faltan.add(`receta de "${nombreBase}"`); return; }
+    if (!calcularCostoReceta(receta)) {
+      datosFaltantesReceta(receta).forEach(f => faltan.add(`${f} ("${nombreBase}")`));
+    }
+  });
+  if (faltan.size > 0) return 'Falta ' + Array.from(faltan).join(', ');
+  return 'Sin costo cargado';
+}
+
+// Info completa de margen para un movimiento, lista para pintar en la UI.
+// Los egresos no tienen concepto de "margen" (no son una venta), así que
+// siempre vuelven sinMargenAplicable:true y no se les pinta ningún indicador.
+function gananciaInfoMovimiento(m) {
+  if (m.tipo !== 'income') return { sinMargenAplicable: true };
+  const pesos = gananciaPesosMovimiento(m);
+  if (pesos === null) return { sinMargenAplicable: false, pesos: null, pct: null, motivo: motivoSinMargenMovimiento(m) };
+  const pct = gananciaPctMovimiento(m);
+  return { sinMargenAplicable: false, pesos, pct, motivo: null };
+}
+
+// Un margen negativo más allá de este umbral (costo real > 3x lo cobrado en
+// esa venta) casi nunca es un margen "real" del negocio: en la práctica
+// suele ser un dato mal cargado en ESE pedido puntual (cantidad de un item,
+// costo de un insumo, un ingrediente con la unidad cambiada, etc.), no un
+// problema del cálculo. Se sigue mostrando el número real (no se oculta),
+// pero se marca para que se revise en vez de leerse como "este producto da
+// pérdida" cuando en otros pedidos con la misma receta da margen normal.
+const MARGEN_PCT_SOSPECHOSO = -200;
+
+// Arma el <span> de margen (o el indicador de "sin datos") que va al lado del monto.
+function gananciaTxtMovimiento(m) {
+  const info = gananciaInfoMovimiento(m);
+  if (info.sinMargenAplicable) return '';
+  if (info.pesos !== null) {
+    const sospechoso = info.pct !== null && info.pct <= MARGEN_PCT_SOSPECHOSO;
+    const tituloSospecha = sospechoso
+      ? ` title="Pérdida muy por encima de lo normal para este pedido puntual — revisá la cantidad y el costo de insumos cargados en ese pedido, es más probable que sea un dato mal cargado que un margen real"`
+      : '';
+    return ` <span${tituloSospecha} style="font-weight:600;color:${info.pesos >= 0 ? 'var(--green)' : 'var(--red)'};${sospechoso ? 'cursor:help' : ''}">(${sospechoso ? '❓ ' : ''}${info.pct !== null ? `${info.pct >= 0 ? '+' : ''}${info.pct}% · ` : ''}${info.pesos >= 0 ? '+' : ''}${fmt(info.pesos)})</span>`;
+  }
+  const motivoEscapado = (info.motivo || '').replace(/"/g, '&quot;');
+  return ` <span title="${motivoEscapado}" style="font-weight:600;color:var(--text3);cursor:help">(⚠️ Sin costo cargado)</span>`;
+}
+
+// Resumen de ganancia agregada para un conjunto de movimientos de un mismo
+// día (suma de ganancia en pesos de los ingresos que tienen costo cargado,
+// y el % que representa sobre el total ingresado ese día). Se usa tanto en
+// "Por día" como en "Calendario" para que el resumen del día sea idéntico
+// en ambas vistas (misma lógica que gananciaTxtMovimiento a nivel movimiento).
+function gananciaResumenDia(items) {
+  const ingDia = items.filter(m => m.tipo === 'income').reduce((s, m) => s + m.monto, 0);
+  const egDia  = items.filter(m => m.tipo === 'expense').reduce((s, m) => s + m.monto, 0);
+  const ingresosConReceta = items.filter(m => m.tipo === 'income' && gananciaPesosMovimiento(m) !== null);
+  const gananciaPesos = ingresosConReceta.length > 0
+    ? ingresosConReceta.reduce((s, m) => s + gananciaPesosMovimiento(m), 0)
+    : null;
+  const gananciaPct = (gananciaPesos !== null && ingDia > 0)
+    ? Math.round((gananciaPesos / ingDia) * 100)
+    : null;
+  return { ingDia, egDia, gananciaPesos, gananciaPct };
+}
+
+// Texto del paréntesis de ganancia agregada del día, mismo formato "(±X% · ±$Y)"
+// que usa gananciaTxtMovimiento a nivel de un movimiento individual.
+function gananciaResumenDiaTxt(resumen) {
+  if (resumen.gananciaPct === null) return '';
+  return ` <span style="font-weight:700;color:${resumen.gananciaPesos >= 0 ? 'var(--green)' : 'var(--red)'}">(${resumen.gananciaPct >= 0 ? '+' : ''}${resumen.gananciaPct}% · ${resumen.gananciaPesos >= 0 ? '+' : ''}${fmt(resumen.gananciaPesos)})</span>`;
 }
 
 function finanzaItem(m) {
-  const gananciaPesos = m.tipo === 'income' ? gananciaPesosMovimiento(m) : null;
-  const gananciaPct = m.tipo === 'income' ? gananciaPctMovimiento(m) : null;
-  const gananciaTxt = gananciaPesos !== null
-    ? ` <span style="font-weight:600;color:${gananciaPesos >= 0 ? 'var(--green)' : 'var(--red)'}">(${gananciaPct !== null ? `${gananciaPct >= 0 ? '+' : ''}${gananciaPct}% · ` : ''}${gananciaPesos >= 0 ? '+' : ''}${fmt(gananciaPesos)})</span>`
-    : '';
+  const gananciaTxt = gananciaTxtMovimiento(m);
   return `
     <div class="finance-item anim-in" style="cursor:pointer" onclick="openEditMovimiento(${m.id})">
       <div class="finance-dot ${m.tipo}">${m.tipo==='income'?'⬆️':'⬇️'}</div>

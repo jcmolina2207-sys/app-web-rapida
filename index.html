@@ -1299,6 +1299,7 @@ let state = {
   recetas: [],
   catalogo: [],   // productos personalizados agregados por Sofi
   gastosFijos: [], // { id, nombre, monto, cadaXDias, tipo }
+  clientes: [],   // datos editables por cliente: { key, nombre, telefono, direccion, nota }
   config: {
     horasProductivasMes: 256, // martes a domingo, 8-14 y 16-19:30, ~27 días/mes
     valorHora: 7200,          // convenio Ayudante Pastelero ($1.444.937 / 200hs), ajustable
@@ -1318,7 +1319,7 @@ let state = {
 let _nextIdFromDB = 1;
 
 // Colecciones que se sincronizan documento-por-documento (subcolecciones reales)
-const SYNCED_COLLECTIONS = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','gastosFijos'];
+const SYNCED_COLLECTIONS = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','gastosFijos','clientes'];
 
 // Sync status UI
 function setSyncStatus(status) {
@@ -1346,8 +1347,17 @@ function catalogoDocId(nombre) {
   return encodeURIComponent(String(nombre || '').trim().toLowerCase()).slice(0, 300);
 }
 
+// Los datos editables de un cliente tampoco tienen id numérico: se
+// identifican por su 'key' (nombre normalizado con normalizarTexto(),
+// el mismo que agrupa sus pedidos en getClientes()).
+function clienteDocId(key) {
+  return encodeURIComponent(String(key || '').trim()).slice(0, 300);
+}
+
 function docIdFor(colName, item) {
-  return colName === 'catalogo' ? catalogoDocId(item.nombre) : String(item.id);
+  if (colName === 'catalogo') return catalogoDocId(item.nombre);
+  if (colName === 'clientes') return clienteDocId(item.key);
+  return String(item.id);
 }
 
 // Guarda/actualiza UN SOLO documento (no pisa el resto de la colección).
@@ -1720,6 +1730,8 @@ function setupRealtimeSync() {
 
         const idx = colName === 'catalogo'
           ? arr.findIndex(x => catalogoDocId(x.nombre) === change.doc.id)
+          : colName === 'clientes'
+          ? arr.findIndex(x => clienteDocId(x.key) === change.doc.id)
           : arr.findIndex(x => String(x.id) === change.doc.id);
 
         if (change.type === 'removed') {
@@ -2597,8 +2609,19 @@ function generarIngresoAutoSiEntregado(p) {
   if (p.sinIngresoAuto) return null;
   const yaExiste = state.movimientos.some(m => m.auto && m.pedidoId === p.id);
   if (yaExiste) return null;
+  // ID DETERMINÍSTICO (no nextId()): si los dos dispositivos reciben el
+  // snapshot de "pedidos" con este pedido en "Entregado" antes de que les
+  // haya llegado el snapshot de "movimientos" con el ingreso que generó
+  // el otro (son dos listeners de colecciones distintas, no hay garantía
+  // de orden), cada uno cree que "no existe todavía" y genera el suyo.
+  // Antes esto creaba DOS documentos distintos (nextId() da un número
+  // distinto en cada dispositivo) => ingreso duplicado en Finanzas.
+  // Ahora el id sale siempre del mismo cálculo a partir de p.id, así que
+  // ambos dispositivos escriben el MISMO docId en Firestore: el segundo
+  // pisa al primero en vez de crear un duplicado.
+  const ID_INGRESO_AUTO_BASE = 900000000;
   const nuevoMov = {
-    id: nextId(), tipo: 'income',
+    id: ID_INGRESO_AUTO_BASE + p.id, tipo: 'income',
     descripcion: `${p.producto} - ${p.cliente}`,
     monto: p.precio, fecha: p.fechaEntrega, auto: true,
     pedidoId: p.id
@@ -7220,7 +7243,7 @@ function getClientes() {
     const key = normalizarTexto(nombre);
     if (!mapa[key]) {
       // Se conserva la primera variante de escritura encontrada como nombre a mostrar
-      mapa[key] = { nombre, pedidos: [], totalGastado: 0, totalAdeudado: 0, ultimoPedido: '', telefono: '' };
+      mapa[key] = { key, nombre, pedidos: [], totalGastado: 0, totalAdeudado: 0, ultimoPedido: '', telefono: '', direccion: '', nota: '' };
     }
     mapa[key].pedidos.push(p);
     mapa[key].totalGastado += p.precio || 0;
@@ -7229,6 +7252,15 @@ function getClientes() {
       mapa[key].ultimoPedido = p.fechaEntrega;
       if (p.telefono) mapa[key].telefono = p.telefono;
     }
+  });
+  // Datos editados a mano (nombre, teléfono, dirección, nota) pisan lo
+  // derivado automáticamente de los pedidos.
+  (state.clientes || []).forEach(info => {
+    if (!mapa[info.key]) return;
+    if (info.nombre) mapa[info.key].nombre = info.nombre;
+    if (info.telefono) mapa[info.key].telefono = info.telefono;
+    mapa[info.key].direccion = info.direccion || '';
+    mapa[info.key].nota = info.nota || '';
   });
   // Prioridad: primero quienes más deben, luego por total gastado
   return Object.values(mapa).sort((a, b) => b.totalAdeudado - a.totalAdeudado || b.totalGastado - a.totalGastado);
@@ -7274,7 +7306,7 @@ function clienteCard(c) {
   const entregados = c.pedidos.filter(p => p.estado === 'done').length;
   const debe = c.totalAdeudado > 0;
   return `
-    <div class="cliente-card anim-in" style="${debe ? 'border:1.5px solid var(--red-light)' : ''}" onclick="openClienteDetalle('${c.nombre.replace(/'/g,"\'")}')">
+    <div class="cliente-card anim-in" style="${debe ? 'border:1.5px solid var(--red-light)' : ''}" onclick="openClienteDetalle('${c.key.replace(/'/g,"\'")}')">
       <div class="cliente-card-header">
         <div class="cliente-card-name">👤 ${c.nombre}</div>
         <div style="font-weight:700;color:var(--accent)">${fmt(c.totalGastado)}</div>
@@ -7289,12 +7321,15 @@ function clienteCard(c) {
   `;
 }
 
-function openClienteDetalle(nombre) {
-  const c = getClientes().find(x => normalizarTexto(x.nombre) === normalizarTexto(nombre));
+function openClienteDetalle(key) {
+  const c = getClientes().find(x => x.key === key);
   if (!c) return;
   const pedidosOrdenados = [...c.pedidos].sort((a, b) => b.fechaEntrega.localeCompare(a.fechaEntrega));
   openModal(`
-    <div class="modal-title">👤 ${c.nombre}</div>
+    <div class="flex gap-8 mb-12" style="align-items:center;justify-content:space-between">
+      <div class="modal-title" style="margin-bottom:0">👤 ${c.nombre}</div>
+      <button class="btn btn-secondary btn-sm" onclick="openClienteEditar('${c.key.replace(/'/g,"\'")}')">✏️ Editar</button>
+    </div>
     <div class="summary-grid" style="margin-bottom:16px">
       <div class="summary-card">
         <div class="label">Pedidos</div>
@@ -7310,15 +7345,17 @@ function openClienteDetalle(nombre) {
       </div>
     </div>
     ${c.telefono ? `
-      <div class="flex gap-8 mb-12" style="align-items:center">
+      <div class="flex gap-8 mb-12" style="align-items:center;flex-wrap:wrap">
         <span class="badge">📱 ${c.telefono}</span>
         <button class="btn btn-secondary btn-sm" onclick="window.open('https://wa.me/${c.telefono.replace(/\D/g,'')}','_blank')">📱 Abrir WhatsApp</button>
       </div>
     ` : ''}
+    ${c.direccion ? `<div class="mb-12" style="font-size:13px;color:var(--text2)">📍 ${c.direccion}</div>` : ''}
+    ${c.nota ? `<div class="mb-12" style="font-size:13px;color:var(--text2);background:var(--surface2,var(--surface));border-radius:var(--radius-sm);padding:8px 10px">📝 ${c.nota}</div>` : ''}
     ${c.totalAdeudado > 0 ? `
       <div class="flex gap-8 mb-12" style="align-items:center">
         <span class="badge badge-unpaid">⚠️ Saldo pendiente: ${fmt(c.totalAdeudado)}</span>
-        <button class="btn btn-secondary btn-sm" onclick="marcarTodosPagados('${c.nombre.replace(/'/g,"\'")}')">💰 Marcar todos como pagados</button>
+        <button class="btn btn-secondary btn-sm" onclick="marcarTodosPagados('${c.key.replace(/'/g,"\'")}')">💰 Marcar todos como pagados</button>
       </div>
     ` : ''}
     <div style="font-weight:600;font-size:14px;margin-bottom:10px;color:var(--text)">Historial de pedidos</div>
@@ -7338,14 +7375,70 @@ function openClienteDetalle(nombre) {
   `);
 }
 
-function marcarTodosPagados(nombre) {
-  const nombreNorm = normalizarTexto(nombre);
-  const pendientes = state.pedidos.filter(p => normalizarTexto(p.cliente.trim()) === nombreNorm && !estaPagadoCompleto(p));
+// Formulario para editar los datos de un cliente (nombre a mostrar,
+// teléfono, dirección, nota). Se guardan en state.clientes, separado de
+// los pedidos, e identificados por la misma 'key' que los agrupa.
+function openClienteEditar(key) {
+  const c = getClientes().find(x => x.key === key);
+  if (!c) return;
+  openModal(`
+    <div class="modal-title">✏️ Editar cliente</div>
+    <div class="form-group">
+      <label class="form-label">Nombre</label>
+      <input class="form-input" id="f-cliente-nombre" type="text" value="${(c.nombre || '').replace(/"/g,'&quot;')}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Celular</label>
+      <input class="form-input" id="f-cliente-telefono" type="tel" placeholder="Ej: 1122334455" value="${(c.telefono || '').replace(/"/g,'&quot;')}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Dirección</label>
+      <input class="form-input" id="f-cliente-direccion" type="text" placeholder="Opcional" value="${(c.direccion || '').replace(/"/g,'&quot;')}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Nota</label>
+      <textarea class="form-input" id="f-cliente-nota" placeholder="Preferencias, alergias, etc. (opcional)">${(c.nota || '')}</textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="openClienteDetalle('${c.key.replace(/'/g,"\'")}')">Cancelar</button>
+      <button class="btn btn-primary" onclick="guardarClienteInfo('${c.key.replace(/'/g,"\'")}')">Guardar</button>
+    </div>
+  `);
+}
+
+function guardarClienteInfo(key) {
+  const nombre = document.getElementById('f-cliente-nombre').value.trim();
+  const telefono = document.getElementById('f-cliente-telefono').value.trim();
+  const direccion = document.getElementById('f-cliente-direccion').value.trim();
+  const nota = document.getElementById('f-cliente-nota').value.trim();
+  if (!nombre) { showToast('⚠️ El nombre no puede quedar vacío'); return; }
+
+  state.clientes = state.clientes || [];
+  let info = state.clientes.find(x => x.key === key);
+  if (!info) {
+    info = { key };
+    state.clientes.push(info);
+  }
+  info.nombre = nombre;
+  info.telefono = telefono;
+  info.direccion = direccion;
+  info.nota = nota;
+  persistItem('clientes', info);
+  saveState();
+
+  closeModal();
+  showToast('✅ Cliente actualizado');
+  renderScreen(activeScreen);
+}
+
+function marcarTodosPagados(key) {
+  const pendientes = state.pedidos.filter(p => normalizarTexto(p.cliente.trim()) === key && !estaPagadoCompleto(p));
   if (pendientes.length === 0) return;
+  const c = getClientes().find(x => x.key === key);
   const total = pendientes.reduce((s, p) => s + saldoPendiente(p), 0);
   showConfirm(
     '¿Marcar todo como pagado?',
-    `Se marcarán ${pendientes.length} pedido${pendientes.length !== 1 ? 's' : ''} de ${nombre} como pagados (${fmt(total)}).`,
+    `Se marcarán ${pendientes.length} pedido${pendientes.length !== 1 ? 's' : ''} de ${c ? c.nombre : ''} como pagados (${fmt(total)}).`,
     () => {
       pendientes.forEach(p => { p.montoPagado = p.precio || 0; delete p.pagado; persistItem('pedidos', p); });
       saveState();

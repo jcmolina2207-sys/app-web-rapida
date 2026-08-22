@@ -110,6 +110,8 @@ self.addEventListener('message', event => {
   if (type === 'TEST_NOTIFICATION') {
     self.registration.showNotification('🍰 Prueba — Toque Artesano', {
       body: 'Las notificaciones funcionan correctamente!',
+      icon: '/icon.png',
+      badge: '/icon.png',
       tag: 'test-' + Date.now(),
       vibrate: [200, 100, 200],
     });
@@ -171,6 +173,8 @@ async function reprogramarPendientes() {
         // Enviar inmediatamente si ya pasó
         self.registration.showNotification(notif.title, {
           body: notif.body,
+          icon: '/icon.png',
+          badge: '/icon.png',
           tag: notif.id,
           vibrate: [200, 100, 200],
         });
@@ -180,6 +184,8 @@ async function reprogramarPendientes() {
         setTimeout(() => {
           self.registration.showNotification(notif.title, {
             body: notif.body,
+            icon: '/icon.png',
+            badge: '/icon.png',
             tag: notif.id,
             vibrate: [200, 100, 200],
           });

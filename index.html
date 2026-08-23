@@ -4770,10 +4770,6 @@ function savePedidoConfirmado(id) {
       }
     }
     renderScreen(activeScreen);
-    // Esperar un tick para que el SW esté listo antes de programar
-    if (Notification.permission === 'granted') {
-      setTimeout(() => programarAlertas1Hora(), 500);
-    }
   };
 
   // El pedido se guarda siempre, tenga o no stock/ingredientes cargados —
@@ -6420,6 +6416,107 @@ function calcularTopProductosPorGanancia(top = 8) {
     .slice(0, top);
 }
 
+/* -------- REPORTES: unidades vendidas por producto / familia -------- */
+// Peso (en kg) del paquete "entero" (100%) para productos que se venden
+// por fracción en vez de por unidad. Hoy sólo biscochos; si en el futuro
+// hay otro producto por peso, se agrega acá su clave y peso base.
+const PESO_BASE_KG = {
+  biscocho: 1, // "Biscochitos 1/4" -> el paquete entero pesa 1kg
+};
+
+// Extrae la fracción de un nombre de producto (ej: "Biscochitos 1/4" -> 0.25).
+// Si el nombre no tiene ninguna fracción, se asume el paquete entero (1).
+function extraerFraccionProducto(nombreBase) {
+  const m = nombreBase.match(/(\d+)\s*\/\s*(\d+)/);
+  if (!m) return 1;
+  return parseInt(m[1], 10) / parseInt(m[2], 10);
+}
+
+// Familia a la que pertenece un producto, para agrupar el reporte de
+// unidades vendidas sin importar la presentación (ej: "Churro simple",
+// "Docena churros DDL" y "Media docena churros chocolate + DDL" son
+// todos de la familia "Churros"; cualquier variante de "Alfajor..." cae
+// en "Alfajores"; etc). Devuelve null si el producto no matchea ninguna
+// familia conocida (no se agrupa, sólo aparece en el detalle).
+function familiaProducto(nombreBase) {
+  const n = nombreBase.toLowerCase();
+  if (/biscocho/.test(n)) return 'Biscochos';
+  if (/churro/.test(n)) return 'Churros';
+  if (/pastafrola/.test(n)) return 'Pastafrolas';
+  if (/alfajor/.test(n)) return 'Alfajores';
+  if (/torta|bizcochuelo|lemon pie/.test(n)) return 'Tortas';
+  return null;
+}
+
+// A cuántas unidades reales equivale una "cantidad" cargada en un pedido,
+// según cómo se vende ese producto (por unidad/c.u., media docena, docena,
+// x8, x12, x24, etc). Ej: cantidad=2 de "Docena churros DDL" -> 24 churros.
+function multiplicadorUnidades(nombreBase) {
+  const n = nombreBase.toLowerCase();
+  if (/media docena/.test(n)) return 6;
+  if (/\bdocena\b/.test(n)) return 12;
+  const mX = n.match(/x\s*(\d+)/);
+  if (mX) return parseInt(mX[1], 10);
+  return 1; // por unidad / c/u
+}
+
+// Formatea un peso en kg como gramos si es menor a 1kg, o en kg con hasta
+// 2 decimales (sin ceros de más) si es 1kg o más.
+function fmtPesoKg(kg) {
+  if (kg < 1) return `${Math.round(kg * 1000)} g`;
+  const kgRedondeado = Math.round(kg * 100) / 100;
+  return `${kgRedondeado} kg`;
+}
+
+// Recorre los pedidos ENTREGADOS y arma, por producto, cuántas unidades
+// reales se vendieron (o cuántos kg/g, si el producto se vende por peso
+// en vez de por unidad — hoy sólo biscochos), y agrupa esos totales por
+// familia (Churros, Alfajores, Tortas, Pastafrolas, Biscochos).
+function calcularUnidadesVendidasPorProducto() {
+  const porProducto = new Map(); // nombreBase -> { producto, unidades, pesoKg, esPeso, familia }
+  const porFamilia = new Map();  // familia -> { familia, unidades, pesoKg }
+
+  state.pedidos.forEach(p => {
+    if (p.estado !== 'done') return;
+    (p.items || []).forEach(it => {
+      const nombreItem = (it.producto || '').trim();
+      if (!nombreItem) return;
+      const cantidad = Number(it.cantidad) || 0;
+      if (cantidad <= 0) return;
+
+      const nombreBase = esPorcion(nombreItem) ? nombreBaseProducto(nombreItem) : nombreItem;
+      const esPeso = /biscocho/i.test(nombreBase);
+      const familia = familiaProducto(nombreBase);
+
+      if (!porProducto.has(nombreBase)) {
+        porProducto.set(nombreBase, { producto: nombreBase, unidades: 0, pesoKg: 0, esPeso, familia });
+      }
+      const bucket = porProducto.get(nombreBase);
+
+      if (esPeso) {
+        const kgSumar = cantidad * extraerFraccionProducto(nombreBase) * PESO_BASE_KG.biscocho;
+        bucket.pesoKg += kgSumar;
+        if (familia) {
+          if (!porFamilia.has(familia)) porFamilia.set(familia, { familia, unidades: 0, pesoKg: 0 });
+          porFamilia.get(familia).pesoKg += kgSumar;
+        }
+      } else {
+        const unidadesSumar = cantidad * multiplicadorUnidades(nombreBase);
+        bucket.unidades += unidadesSumar;
+        if (familia) {
+          if (!porFamilia.has(familia)) porFamilia.set(familia, { familia, unidades: 0, pesoKg: 0 });
+          porFamilia.get(familia).unidades += unidadesSumar;
+        }
+      }
+    });
+  });
+
+  return {
+    productos: [...porProducto.values()].sort((a, b) => (b.unidades + b.pesoKg * 1000) - (a.unidades + a.pesoKg * 1000)),
+    familias: [...porFamilia.values()].sort((a, b) => (b.unidades + b.pesoKg * 1000) - (a.unidades + a.pesoKg * 1000)),
+  };
+}
+
 function renderFinanzas() {
   const el = document.getElementById('screen-finanzas');
   // Auto-sincronizar: si hay pedidos "Entregado" sin su ingreso reflejado
@@ -6657,6 +6754,27 @@ function renderReportes() {
   const maxIng = Math.max(1, ...topIngresos.map(t => t.ingresos));
   const maxCantGanancia = Math.max(1, ...topGanancia.map(t => t.cantidad));
 
+  // -------- Unidades vendidas (por familia y por producto) --------
+  const { productos: unidadesProductos, familias: unidadesFamilias } = calcularUnidadesVendidasPorProducto();
+
+  const filaFamilia = (f) => {
+    const valor = f.pesoKg > 0 ? fmtPesoKg(f.pesoKg) : `${f.unidades} un.`;
+    return `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;border-bottom:1px solid var(--border)">
+        <span style="font-weight:700;font-size:13px;color:var(--text)">${f.familia}</span>
+        <span style="font-weight:700;font-size:13px;color:var(--accent)">${valor}</span>
+      </div>`;
+  };
+
+  const filaProducto = (t) => {
+    const valor = t.esPeso ? fmtPesoKg(t.pesoKg) : `${t.unidades} un.`;
+    return `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;gap:8px">
+        <span style="font-size:12.5px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.producto}</span>
+        <span style="font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap">${valor}</span>
+      </div>`;
+  };
+
   return `
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-bottom:16px;box-shadow:var(--shadow);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
       <div>
@@ -6697,6 +6815,19 @@ function renderReportes() {
           : topGanancia.map(t => gananciaRow(t, maxCantGanancia)).join('')
         }
       </div>
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-top:12px;box-shadow:var(--shadow)">
+      <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:2px">📏 Unidades vendidas</div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:10px">Sobre pedidos entregados · churros, alfajores y tortas en unidades reales · biscochos en kg/g</div>
+      ${unidadesFamilias.length === 0 && unidadesProductos.length === 0
+        ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">Todavía no hay pedidos entregados</p></div>`
+        : `
+          ${unidadesFamilias.length > 0 ? `<div style="margin-bottom:12px">${unidadesFamilias.map(filaFamilia).join('')}</div>` : ''}
+          <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:4px">Detalle por producto</div>
+          ${unidadesProductos.map(filaProducto).join('')}
+        `
+      }
     </div>
 
     ${renderReporteSueldoSimulado()}
@@ -6757,9 +6888,15 @@ function calcularCierreSemana(sel) {
   const egresos = movs.filter(m => m.tipo === 'expense').reduce((s, m) => s + m.monto, 0);
   const neto = ingresos - egresos;
 
+  // Pedidos entregados en el rango (por fecha de entrega, no de creación).
+  // Sólo lectura de state.pedidos: no toca marcarEntregado ni la lógica de stock.
+  const pedidosEntregados = state.pedidos.filter(p =>
+    p.estado === 'done' && p.fechaEntrega >= inicio && p.fechaEntrega <= fin
+  ).length;
+
   const { materiaPrima, ahorro, sueldo, colchon, r } = calcularRepartoPesos(neto);
 
-  return { inicio, fin, ingresos, egresos, neto, r, reparto: { materiaPrima, ahorro, sueldo, colchon } };
+  return { inicio, fin, ingresos, egresos, neto, pedidosEntregados, r, reparto: { materiaPrima, ahorro, sueldo, colchon } };
 }
 
 function textoCierreSemana(sel) {
@@ -6772,6 +6909,7 @@ function textoCierreSemana(sel) {
 Ingresos: ${fmt(d.ingresos)}
 Egresos: ${fmt(d.egresos)}
 Neto: ${fmt(d.neto)}
+Pedidos entregados: ${d.pedidosEntregados}
 
 📊 Reparto sugerido:
 🧂 Materia prima: ${fmt(reparto.materiaPrima)} (${r.materiaPrima}%)
@@ -6806,6 +6944,7 @@ function renderCierreSemanaModal() {
       <span class="label fw-600">Neto</span>
       <span class="value fw-600" style="color:${d.neto >= 0 ? 'var(--green)' : 'var(--red)'}">${fmt(d.neto)}</span>
     </div>
+    <div class="detail-row"><span class="label">Pedidos entregados</span><span class="value">${d.pedidosEntregados}</span></div>
 
     <div class="divider"></div>
 
@@ -8161,67 +8300,17 @@ function sendNotification(title, body) {
 window.sendNotification = sendNotification;
 window.testNotif = function() { sendNotification('🍰 Prueba', 'Las notificaciones funcionan!'); };
 
-function getPedidosHoy() {
-  const hoy = todayStr();
-  return state.pedidos.filter(p => p.fechaEntrega === hoy && p.estado !== 'done');
-}
-
-function getNotasHoy() {
-  const hoy = todayStr();
-  return state.notas.filter(n => n.fecha === hoy);
-}
-
-function buildResumenDiario() {
-  const pedidos = getPedidosHoy();
-  const notas = getNotasHoy();
-  let body = '';
-  if (pedidos.length > 0) {
-    body += `📦 ${pedidos.length} pedido${pedidos.length > 1 ? 's' : ''} para hoy: ${pedidos.map(p => p.cliente).join(', ')}
-`;
-  }
-  if (notas.length > 0) {
-    body += `📝 ${notas.length} nota${notas.length > 1 ? 's' : ''} de hoy`;
-  }
-  return body.trim();
-}
-
-function programarNotificacionDiaria() {
-  if (Notification.permission !== 'granted') return;
-  const ahora = new Date();
-  const objetivo = new Date();
-  objetivo.setHours(7, 0, 0, 0);
-  if (ahora >= objetivo) objetivo.setDate(objetivo.getDate() + 1);
-  const msHasta = objetivo.getTime() - ahora.getTime();
-  if (window._notifTimer) clearTimeout(window._notifTimer);
-  // Usar SW para la notificación de las 7am
-  const fireAt7am = objetivo.getTime();
-  scheduleNotifViaSW(
-    'notif-7am-' + objetivo.toDateString(),
-    '☀️ Buenos días, Toque Artesano de Sofi!',
-    buildResumenDiario() || 'No tenés pedidos ni notas para hoy 🎉',
-    fireAt7am
-  );
-  // Reprogramar para el día siguiente via setTimeout
-  window._notifTimer = setTimeout(() => {
-    programarNotificacionDiaria();
-    setTimeout(() => programarAlertas1Hora(), 5000);
-  }, msHasta);
-  const h = Math.floor(msHasta / 3600000);
-  const m = Math.floor((msHasta % 3600000) / 60000);
-  console.log(`🔔 Notificación en ${h}h ${m}m`);
-}
-
-function testNotificacion() {
-  const body = buildResumenDiario();
-  sendNotification('🍰 Vista previa — Toque Artesano',
-    body || 'Sin pedidos ni notas para hoy ✨');
-}
-
+// El resumen de las 7am, el recordatorio de notas a las 23hs, las alertas
+// de pedido (1h/15min) y las de stock bajo YA NO se programan acá con
+// setTimeout local ni vía Service Worker + IndexedDB — eso dependía de que
+// el navegador/SW siguiera vivo a esa hora, algo poco confiable si no se
+// abre la app ese día. Ahora las manda el workflow de GitHub Actions vía
+// FCM push real (ver scripts/send-notifications.js), así llegan aunque la
+// app nunca se haya abierto. Acá solo queda pedir permiso y registrar el
+// token del dispositivo para que el cron sepa a quién mandarle.
 async function activarNotificaciones() {
   await requestNotificationPermission();
   if (Notification.permission === 'granted') {
-    programarNotificacionDiaria();
-    programarAlertas1Hora();
     registrarTokenFCM();
   }
   updateBellIcon();
@@ -8234,7 +8323,7 @@ function toggleNotificaciones() {
     activarNotificaciones();
   } else if (Notification.permission === 'granted') {
     // Mostrar mini popup de estado
-    showToast('🔔 Notificaciones activas — se envían a las 7am y 1h antes de cada pedido');
+    showToast('🔔 Notificaciones activas — se envían a las 7am, 23hs y 1h antes de cada pedido');
   } else {
     showToast('🔕 Notificaciones bloqueadas. Habilitá en Configuración de Chrome');
   }
@@ -8258,44 +8347,6 @@ function updateBellIcon() {
     if (dot) { dot.style.display = 'block'; } // puntito rojo = no activado
   }
 }
-
-// Alertas 1h/15min antes de cada pedido: YA NO se programan acá con
-// setTimeout local (eso es lo que se perdía si el navegador quedaba
-// inactivo). Ahora las manda el workflow de GitHub Actions vía FCM
-// push real — ver scripts/send-notifications.js — y esta función solo
-// se ocupa del recordatorio de notas del día.
-function programarAlertas1Hora() {
-  if (Notification.permission !== 'granted') return;
-
-  // Limpiar timers previos
-  if (window._pedidoTimers) window._pedidoTimers.forEach(t => clearTimeout(t));
-  window._pedidoTimers = [];
-
-  const ahora = new Date();
-  let programados = 0;
-
-  // Notas del día — recordatorio a las 11pm.
-  // Se programa vía Service Worker + IndexedDB (scheduleNotifViaSW), igual
-  // que la notificación de las 7am, para que sobreviva si se cierra la
-  // pestaña o el navegador queda inactivo. Ya no usa setTimeout local.
-  const notasHoy = getNotasHoy();
-  if (notasHoy.length > 0) {
-    const fin = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate(), 23, 0, 0, 0);
-    const msHastaFin = fin.getTime() - ahora.getTime();
-    if (msHastaFin > 0) {
-      scheduleNotifViaSW(
-        'notif-notas-' + ahora.toDateString(),
-        '📝 Recordatorio de notas',
-        `Tenés ${notasHoy.length} nota${notasHoy.length > 1 ? 's' : ''} para hoy`,
-        fin.getTime()
-      );
-    }
-  }
-
-  console.log(`🔔 ${programados} alerta(s) de pedido programada(s)`);
-}
-window.programarAlertas1Hora = programarAlertas1Hora;
-window.programarNotificacionDiaria = programarNotificacionDiaria;
 
 function renderAtrasadosBanner() {
   const atrasados = pedidosAtrasados();
@@ -8448,40 +8499,6 @@ async function registrarSW() {
   }
 }
 
-// Enviar notificación via Service Worker (funciona en segundo plano)
-async function scheduleNotifViaSW(id, title, body, fireAt) {
-  try {
-    // Esperar a que el SW esté listo y controlando la página
-    const reg = await navigator.serviceWorker.ready;
-    // Forzar que el SW tome control si todavía no lo hizo
-    if (!navigator.serviceWorker.controller) {
-      console.warn('[App] SW aún no controla, esperando...');
-      await new Promise(resolve => {
-        const handler = () => { resolve(); navigator.serviceWorker.removeEventListener('controllerchange', handler); };
-        navigator.serviceWorker.addEventListener('controllerchange', handler);
-        // Timeout de seguridad — 3 segundos
-        setTimeout(resolve, 3000);
-      });
-    }
-    if (navigator.serviceWorker.controller) {
-      navigator.serviceWorker.controller.postMessage({
-        type: 'SCHEDULE_NOTIFICATION',
-        payload: { id, title, body, fireAt }
-      });
-      console.log(`[App] ✅ Notif "${title}" enviada al SW, dispara en ${Math.round((fireAt - Date.now())/60000)} min`);
-    } else {
-      // Fallback final con setTimeout
-      console.warn('[App] SW no disponible, usando setTimeout como fallback');
-      const ms = fireAt - Date.now();
-      if (ms > 0) setTimeout(() => sendNotification(title, body), ms);
-    }
-  } catch(e) {
-    console.error('[App] Error enviando al SW:', e);
-    const ms = fireAt - Date.now();
-    if (ms > 0) setTimeout(() => sendNotification(title, body), ms);
-  }
-}
-
 function testNotifSW() {
   if (navigator.serviceWorker.controller) {
     navigator.serviceWorker.controller.postMessage({ type: 'TEST_NOTIFICATION' });
@@ -8500,8 +8517,6 @@ registrarSW().then(() => {
     loadFromFirebase().then(() => {
       setupRealtimeSync();
       if (Notification.permission === 'granted') {
-        programarNotificacionDiaria();
-        programarAlertas1Hora();
         registrarTokenFCM(); // refresca el token por si cambió
       }
       updateBellIcon();

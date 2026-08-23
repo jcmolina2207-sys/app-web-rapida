@@ -1,32 +1,22 @@
 {
   "name": "Toque Artesano de Sofi",
   "short_name": "Toque Artesano",
-  "description": "Gestión de pedidos, stock, recetas y finanzas para Toque Artesano de Sofi.",
-  "start_url": "./index.html",
-  "scope": "./",
+  "start_url": "./",
   "display": "standalone",
-  "orientation": "portrait-primary",
-  "background_color": "#f0f5ff",
+  "background_color": "#0d1b3e",
   "theme_color": "#0d1b3e",
-  "lang": "es",
   "icons": [
     {
       "src": "icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any"
+      "purpose": "any maskable"
     },
     {
       "src": "icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "icon-maskable-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
+      "purpose": "any maskable"
     }
   ]
 }

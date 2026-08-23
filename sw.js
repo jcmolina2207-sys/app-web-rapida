@@ -3,7 +3,7 @@
    Maneja notificaciones en segundo plano
 ============================================================ */
 
-const SW_VERSION = 'v1.1';
+const SW_VERSION = 'v1.2';
 
 /* ------------------------------------------------------------
    FCM (Firebase Cloud Messaging) — recibe pushes reales enviadas
@@ -63,49 +63,17 @@ self.addEventListener('activate', event => {
   event.waitUntil(self.clients.claim());
 });
 
-// Escuchar mensajes desde la app
+// Escuchar mensajes desde la app.
+// SCHEDULE_NOTIFICATION / CANCEL_NOTIFICATIONS y el respaldo por IndexedDB
+// se eliminaron: dependían de que el SW siguiera vivo a la hora del disparo
+// (setTimeout local), algo poco confiable si el navegador se cerraba o el
+// SO mataba el proceso. El resumen 7am, el recordatorio de notas 23hs, las
+// alertas de pedido y las de stock bajo ahora llegan todas como push FCM
+// real desde el cron de GitHub Actions (scripts/send-notifications.js),
+// entregadas por el sistema operativo aunque el navegador esté cerrado.
+// Solo queda TEST_NOTIFICATION para pruebas manuales desde la app.
 self.addEventListener('message', event => {
-  const { type, payload } = event.data || {};
-
-  if (type === 'SCHEDULE_NOTIFICATION') {
-    const { id, title, body, fireAt } = payload;
-    const msHasta = fireAt - Date.now();
-
-    console.log(`[SW] Notificación "${title}" programada en ${Math.round(msHasta/60000)} min`);
-
-    if (msHasta <= 0) {
-      // Mandar ahora si ya pasó el tiempo
-      self.registration.showNotification(title, {
-        body,
-        icon: '/icon.png',
-        badge: '/icon.png',
-        tag: id,
-        requireInteraction: false,
-        vibrate: [200, 100, 200],
-      });
-      return;
-    }
-
-    // Guardar en indexedDB para persistir si se cierra la pestaña
-    saveScheduledNotification({ id, title, body, fireAt });
-
-    // También programar con setTimeout como backup
-    setTimeout(() => {
-      self.registration.showNotification(title, {
-        body,
-        icon: '/icon.png',
-        badge: '/icon.png',
-        tag: id,
-        requireInteraction: false,
-        vibrate: [200, 100, 200],
-      });
-      deleteScheduledNotification(id);
-    }, msHasta);
-  }
-
-  if (type === 'CANCEL_NOTIFICATIONS') {
-    clearAllScheduled();
-  }
+  const { type } = event.data || {};
 
   if (type === 'TEST_NOTIFICATION') {
     self.registration.showNotification('🍰 Prueba — Toque Artesano', {
@@ -116,89 +84,6 @@ self.addEventListener('message', event => {
       vibrate: [200, 100, 200],
     });
   }
-});
-
-// ---- IndexedDB helpers ----
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open('toque-notifs', 1);
-    req.onupgradeneeded = e => {
-      e.target.result.createObjectStore('scheduled', { keyPath: 'id' });
-    };
-    req.onsuccess = e => resolve(e.target.result);
-    req.onerror = e => reject(e);
-  });
-}
-
-async function saveScheduledNotification(notif) {
-  try {
-    const db = await openDB();
-    const tx = db.transaction('scheduled', 'readwrite');
-    tx.objectStore('scheduled').put(notif);
-  } catch(e) { console.error('[SW] Error guardando notif', e); }
-}
-
-async function deleteScheduledNotification(id) {
-  try {
-    const db = await openDB();
-    const tx = db.transaction('scheduled', 'readwrite');
-    tx.objectStore('scheduled').delete(id);
-  } catch(e) {}
-}
-
-async function clearAllScheduled() {
-  try {
-    const db = await openDB();
-    const tx = db.transaction('scheduled', 'readwrite');
-    tx.objectStore('scheduled').clear();
-  } catch(e) {}
-}
-
-// Al activar el SW, reprogramar notificaciones pendientes de IndexedDB
-async function reprogramarPendientes() {
-  try {
-    const db = await openDB();
-    const tx = db.transaction('scheduled', 'readonly');
-    const store = tx.objectStore('scheduled');
-    const all = await new Promise((res, rej) => {
-      const req = store.getAll();
-      req.onsuccess = e => res(e.target.result);
-      req.onerror = rej;
-    });
-
-    const ahora = Date.now();
-    all.forEach(notif => {
-      const msHasta = notif.fireAt - ahora;
-      if (msHasta <= 0) {
-        // Enviar inmediatamente si ya pasó
-        self.registration.showNotification(notif.title, {
-          body: notif.body,
-          icon: '/icon.png',
-          badge: '/icon.png',
-          tag: notif.id,
-          vibrate: [200, 100, 200],
-        });
-        deleteScheduledNotification(notif.id);
-      } else {
-        // Reprogramar
-        setTimeout(() => {
-          self.registration.showNotification(notif.title, {
-            body: notif.body,
-            icon: '/icon.png',
-            badge: '/icon.png',
-            tag: notif.id,
-            vibrate: [200, 100, 200],
-          });
-          deleteScheduledNotification(notif.id);
-        }, msHasta);
-        console.log(`[SW] Reprogramada "${notif.title}" en ${Math.round(msHasta/60000)} min`);
-      }
-    });
-  } catch(e) { console.error('[SW] Error reprogramando', e); }
-}
-
-self.addEventListener('activate', event => {
-  event.waitUntil(reprogramarPendientes());
 });
 
 // Click en notificación — abrir la app

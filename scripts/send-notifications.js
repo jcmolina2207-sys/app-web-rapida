@@ -104,8 +104,106 @@ async function main() {
   }
 
   await revisarStockBajo(tokens);
+  await revisarResumen7am(tokens, ahora, hoy, pedidosSnap);
+  await revisarRecordatorioNotas23h(tokens, ahora, hoy);
 
   console.log('Listo.');
+}
+
+/* ------------------------------------------------------------
+   Resumen de las 7am y recordatorio de notas a las 23hs.
+   Antes se programaban client-side vía Service Worker + setTimeout
+   (scheduleNotifViaSW en index.html/sw.js), lo cual dependía de que
+   el navegador/SW siguiera vivo a esa hora — poco confiable si no se
+   abre la app ese día. Ahora, igual que las alertas de pedido y de
+   stock bajo, las manda este cron por FCM real, así llegan aunque
+   la app nunca se haya abierto.
+
+   Anti-duplicado: como no son "por documento" sino "una vez al día",
+   guardamos la fecha del último envío en un doc de config
+   (sistema/notificacionesDiarias) y comparamos contra `hoy`.
+------------------------------------------------------------ */
+const REF_NOTIF_DIARIAS = () => db.collection('sistema').doc('notificacionesDiarias');
+
+async function revisarResumen7am(tokens, ahora, hoy, pedidosSnap) {
+  const objetivo = new Date(Date.UTC(
+    ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate(), 7, 0, 0, 0
+  ));
+  const minutosDesde = (ahora.getTime() - objetivo.getTime()) / 60000;
+  const enVentana = minutosDesde >= 0 && minutosDesde <= 20;
+  if (!enVentana) return;
+
+  const configSnap = await REF_NOTIF_DIARIAS().get();
+  const yaEnviado = configSnap.exists && configSnap.data().resumen7amFecha === hoy;
+  if (yaEnviado) return;
+
+  const pedidosHoy = pedidosSnap.docs
+    .map(d => d.data())
+    .filter(p => p.estado !== 'done');
+  const notasSnap = await db.collection('notas').where('fecha', '==', hoy).get();
+  const notasHoy = notasSnap.docs.map(d => d.data());
+
+  let body = '';
+  if (pedidosHoy.length > 0) {
+    body += `📦 ${pedidosHoy.length} pedido${pedidosHoy.length > 1 ? 's' : ''} para hoy: ${pedidosHoy.map(p => p.cliente).join(', ')}`;
+  }
+  if (notasHoy.length > 0) {
+    body += `${body ? '\n' : ''}📝 ${notasHoy.length} nota${notasHoy.length > 1 ? 's' : ''} de hoy`;
+  }
+  if (!body) body = 'No tenés pedidos ni notas para hoy 🎉';
+
+  await enviarYMarcarDiaria(tokens,
+    '☀️ Buenos días, Toque Artesano de Sofi!',
+    body,
+    'resumen7amFecha', hoy);
+}
+
+async function revisarRecordatorioNotas23h(tokens, ahora, hoy) {
+  const objetivo = new Date(Date.UTC(
+    ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate(), 23, 0, 0, 0
+  ));
+  const minutosDesde = (ahora.getTime() - objetivo.getTime()) / 60000;
+  const enVentana = minutosDesde >= 0 && minutosDesde <= 20;
+  if (!enVentana) return;
+
+  const configSnap = await REF_NOTIF_DIARIAS().get();
+  const yaEnviado = configSnap.exists && configSnap.data().recordatorioNotas23hFecha === hoy;
+  if (yaEnviado) return;
+
+  const notasSnap = await db.collection('notas').where('fecha', '==', hoy).get();
+  const notasHoy = notasSnap.docs.map(d => d.data());
+  // Solo molesta si hay algo que recordar, igual que hacía la versión client-side.
+  if (notasHoy.length === 0) return;
+
+  await enviarYMarcarDiaria(tokens,
+    '📝 Recordatorio de notas',
+    `Tenés ${notasHoy.length} nota${notasHoy.length > 1 ? 's' : ''} para hoy`,
+    'recordatorioNotas23hFecha', hoy);
+}
+
+async function enviarYMarcarDiaria(tokens, title, body, campoFlag, hoy) {
+  if (tokens.length > 0) {
+    try {
+      const resp = await messaging.sendEachForMulticast({
+        notification: { title, body },
+        tokens,
+      });
+      console.log(`📨 "${title}" → ${resp.successCount} ok, ${resp.failureCount} fallidos`);
+
+      resp.responses.forEach((r, i) => {
+        if (!r.success && (
+          r.error?.code === 'messaging/registration-token-not-registered' ||
+          r.error?.code === 'messaging/invalid-registration-token'
+        )) {
+          db.collection('dispositivos').doc(tokens[i]).delete().catch(() => {});
+        }
+      });
+    } catch (e) {
+      console.error('Error enviando FCM:', e);
+    }
+  }
+  // Guardamos la fecha aunque no haya tokens, para no reintentar todo el día.
+  await REF_NOTIF_DIARIAS().set({ [campoFlag]: hoy }, { merge: true });
 }
 
 /* ------------------------------------------------------------

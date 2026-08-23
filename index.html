@@ -2212,6 +2212,7 @@ function renderInicio() {
     <div class="dash-date">${fechaLarga}</div>
     ${renderNotifBanner()}
     ${renderAtrasadosBanner()}
+    ${renderStockComprometidoBanner()}
     ${renderGastosFijosBanner()}
     ${renderBackupBanner()}
     <div class="dash-grid">
@@ -3428,6 +3429,13 @@ let _pedidoItems = [];
 // botón "Tocá para usarlo" no tenga que embeber el nombre en el onclick.
 let _pedidoClienteSugeridoActual = null;
 
+// Últimos productos frecuentes calculados para el cliente elegido en el
+// formulario de pedido actual (ver productosFrecuentesDeCliente). Se guarda
+// acá, en vez de embeber el nombre del producto en el onclick del chip, por
+// el mismo motivo que _pedidoClienteSugeridoActual: evita líos de escapado
+// con nombres de producto que traigan comillas o caracteres raros.
+let _productosFrecuentesActual = [];
+
 function openPedidoForm(id, datosImportados) {
   const p = id ? state.pedidos.find(x => x.id === id) : null;
   const titulo = p ? 'Editar pedido' : (datosImportados ? 'Nuevo pedido (importado — revisá antes de guardar)' : 'Nuevo pedido');
@@ -3435,6 +3443,7 @@ function openPedidoForm(id, datosImportados) {
   _pedidoItems = p?.items ? JSON.parse(JSON.stringify(p.items))
     : (datosImportados?.items ? JSON.parse(JSON.stringify(datosImportados.items)) : []);
   _pedidoClienteSugeridoActual = datosImportados?.clienteSugerido || null;
+  _productosFrecuentesActual = [];
 
   const clienteInicial = p?.cliente || datosImportados?.cliente || '';
 
@@ -3470,6 +3479,7 @@ function openPedidoForm(id, datosImportados) {
 
     <label class="form-label">Productos *</label>
     <div class="items-list" id="items-list"></div>
+    <div id="productos-frecuentes-wrap"></div>
 
     <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px;border:1px solid var(--border);margin-bottom:14px">
       <div class="form-label" style="margin-bottom:8px">Agregar producto</div>
@@ -4413,8 +4423,68 @@ function initClienteAutocomplete() {
         const tel = buscarTelefonoCliente(opt.dataset.nombre);
         if (tel) telInput.value = tel;
       }
+      renderProductosFrecuentes(opt.dataset.nombre);
     },
   });
+}
+
+// Busca en state.pedidos todos los pedidos de un cliente (mismo criterio de
+// match por normalizarTexto que se usa para agrupar clientes) y devuelve el
+// top 3 de productos que más pidió, ordenado por frecuencia. Cuenta tanto
+// pedidos "simples" (p.producto) como multi-producto (cada item de p.items).
+// Función de solo lectura: no toca state.pedidos ni state.clientes.
+function productosFrecuentesDeCliente(nombreCliente) {
+  const norm = normalizarTexto((nombreCliente || '').trim());
+  if (!norm) return [];
+  const conteo = new Map();
+  state.pedidos
+    .filter(p => normalizarTexto((p.cliente || '').trim()) === norm)
+    .forEach(p => {
+      const productos = (p.items && p.items.length) ? p.items.map(i => i.producto) : [p.producto];
+      productos.filter(Boolean).forEach(nombre => {
+        const key = nombre.trim();
+        if (!key) return;
+        conteo.set(key, (conteo.get(key) || 0) + 1);
+      });
+    });
+  return [...conteo.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([producto]) => producto);
+}
+
+// Pinta los chips "🔁 Suele pedir: ..." debajo de la lista de productos del
+// pedido, con los productos más frecuentes del cliente elegido. Si el cliente
+// es nuevo o no tiene pedidos previos, no muestra nada (sin texto de "sin
+// sugerencias") para no ocupar espacio de más.
+function renderProductosFrecuentes(nombreCliente) {
+  const wrap = document.getElementById('productos-frecuentes-wrap');
+  if (!wrap) return;
+  _productosFrecuentesActual = productosFrecuentesDeCliente(nombreCliente);
+  if (_productosFrecuentesActual.length === 0) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = `
+    <div style="font-size:11px;color:var(--text3);margin:6px 0 4px">🔁 Suele pedir:</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+      ${_productosFrecuentesActual.map((nombre, idx) => `
+        <button type="button" class="btn btn-secondary btn-sm" onclick="agregarProductoFrecuente(${idx})" style="font-size:11px;padding:4px 8px">
+          ${esc(nombre)}
+        </button>
+      `).join('')}
+    </div>`;
+}
+
+// Agrega directo a _pedidoItems el producto frecuente que Sofía tocó. Mismo
+// criterio de precio que aplicarProductoSugerido: si el producto existe en el
+// catálogo con precio cargado lo usa; si no, entra en $0 y se avisa para que
+// lo complete a mano (nunca se inventa un precio).
+function agregarProductoFrecuente(idx) {
+  const nombre = _productosFrecuentesActual[idx];
+  if (!nombre) return;
+  const catItem = getCatalogo().find(p => p.nombre.toLowerCase() === nombre.toLowerCase());
+  const precioUnit = catItem && catItem.precio > 0 ? catItem.precio : 0;
+  _pedidoItems.push({ producto: nombre, cantidad: 1, precioUnit, subtotal: precioUnit });
+  if (!precioUnit) showToast(`⚠️ "${nombre}" agregado sin precio — completalo a mano`);
+  renderItemsList();
 }
 
 // Busca el teléfono más reciente cargado para un cliente (case/acento-insensible)
@@ -4724,6 +4794,9 @@ function renderIngredientes() {
   const el = document.getElementById('screen-ingredientes');
   const pct = globalStockPct();
   const sorted = [...state.ingredientes].sort((a, b) => stockPct(a) - stockPct(b));
+  // Mapa ingId -> info de faltante, para pintar el ⚠️ junto al stock de
+  // los ingredientes comprometidos por pedidos de los próximos 7 días.
+  const comprometidoPorIng = new Map(calcularStockComprometido().map(f => [f.ingId, f]));
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
@@ -4743,7 +4816,7 @@ function renderIngredientes() {
     </div>
     ${sorted.length === 0
       ? `<div class="empty-state" style="padding:20px 0"><div class="empty-icon">🧂</div><p>Sin ingredientes. Tocá + para agregar.</p></div>`
-      : `<div class="list-2col">${sorted.map(i => ingredienteItem(i)).join('')}</div>`}
+      : `<div class="list-2col">${sorted.map(i => ingredienteItem(i, comprometidoPorIng.get(i.id))).join('')}</div>`}
   `;
 }
 
@@ -5006,13 +5079,19 @@ function saveConfigSueldoSimulado() {
   renderScreen(activeScreen);
 }
 
-function ingredienteItem(i) {
+function ingredienteItem(i, comprometido) {
   const pct = stockPct(i);
   const color = stockColor(pct);
+  const warnTitle = comprometido
+    ? `No alcanza para: ${comprometido.pedidosAfectados.map(p => `${p.cliente} (${fmtDate(p.fechaEntrega)})`).join(', ')} — faltan ${comprometido.faltante} ${comprometido.unidad}`
+    : '';
+  const warnBadge = comprometido
+    ? `<span title="${esc(warnTitle)}" style="font-size:13px;cursor:help">⚠️</span>`
+    : '';
   return `
     <div class="ingredient-item anim-in">
       <div class="ingredient-header">
-        <div class="ingredient-name">${i.nombre}</div>
+        <div class="ingredient-name">${i.nombre} ${warnBadge}</div>
         <span style="font-size:13px;font-weight:700;color:${color==='green'?'var(--green)':color==='yellow'?'var(--yellow)':'var(--red)'}">${pct}%</span>
       </div>
       <div class="ingredient-amounts">${i.stock} ${i.unidad} de ${i.ideal} ${i.unidad} ideal</div>
@@ -5661,6 +5740,83 @@ function verificarStockSuficiente(items) {
   return advertencias;
 }
 
+/**
+ * Cruza el stock actual contra lo que consumirían los pedidos ya agendados
+ * (estado != 'done') con fechaEntrega dentro de los próximos 7 días
+ * (incluyendo hoy). Es SOLO LECTURA: reutiliza la misma lógica de cálculo
+ * que descontarMateriaPrimaByPedido/verificarStockSuficiente (receta +
+ * rinde + factor por porción) pero nunca toca ing.stock.
+ *
+ * Devuelve un array de:
+ *   { ingId, ingrediente, unidad, faltante, pedidosAfectados: [{id, cliente, producto, fechaEntrega}] }
+ * ordenado por faltante descendente. Array vacío = no hay problema.
+ *
+ * Nota de performance: hoy recorre todos los pedidos activos + sus items en
+ * cada render de Inicio (O(pedidos × items)), lo cual está bien para el
+ * volumen actual. Si el volumen de pedidos creciera mucho, convendría
+ * cachear el resultado por un ratito (ej. invalidar solo cuando cambian
+ * pedidos/stock) en vez de recalcular en cada render.
+ */
+function calcularStockComprometido() {
+  const hoy = todayStr();
+  const limite = addDiasStr(hoy, 7);
+
+  const pedidosEnVentana = state.pedidos.filter(p =>
+    p.estado !== 'done' &&
+    !p.stockDescontado &&
+    p.fechaEntrega >= hoy && p.fechaEntrega <= limite
+  );
+  if (pedidosEnVentana.length === 0) return [];
+
+  // ingId -> { necesario, pedidos: Map(pedidoId -> pedido) }
+  const necesarios = new Map();
+
+  pedidosEnVentana.forEach(p => {
+    (p.items || []).forEach(item => {
+      const esItemPorcion = esPorcion(item.producto);
+      const nombreBase = esItemPorcion ? nombreBaseProducto(item.producto) : item.producto;
+      const receta = state.recetas.find(r => r.producto === nombreBase);
+      if (!receta || !receta.ingredientes || receta.ingredientes.length === 0) return;
+
+      let factor;
+      if (esItemPorcion) {
+        const porciones = receta.porcionesPorUnidad || 1;
+        factor = (item.cantidad / porciones) / receta.rinde;
+      } else {
+        factor = item.cantidad / receta.rinde;
+      }
+
+      receta.ingredientes.forEach(ri => {
+        const cantNecesaria = Math.round(ri.cantidad * factor * 1000) / 1000;
+        if (!necesarios.has(ri.ingId)) necesarios.set(ri.ingId, { necesario: 0, pedidos: new Map() });
+        const entry = necesarios.get(ri.ingId);
+        entry.necesario = Math.round((entry.necesario + cantNecesaria) * 1000) / 1000;
+        entry.pedidos.set(p.id, p);
+      });
+    });
+  });
+
+  const resultado = [];
+  necesarios.forEach((entry, ingId) => {
+    const ing = state.ingredientes.find(x => x.id === ingId);
+    if (!ing) return;
+    if (ing.stock < entry.necesario) {
+      resultado.push({
+        ingId: ing.id,
+        ingrediente: ing.nombre,
+        unidad: ing.unidad,
+        faltante: Math.round((entry.necesario - ing.stock) * 1000) / 1000,
+        pedidosAfectados: [...entry.pedidos.values()].map(p => ({
+          id: p.id, cliente: p.cliente, producto: p.producto, fechaEntrega: p.fechaEntrega,
+        })),
+      });
+    }
+  });
+
+  resultado.sort((a, b) => b.faltante - a.faltante);
+  return resultado;
+}
+
 // Descuenta materia prima y devuelve un array de textos descriptivos (como
 // antes) con una propiedad extra `.detalle` = [{ingId, cantidad}] con lo
 // REALMENTE descontado de cada ingrediente (ya clampeado a 0 si el stock no
@@ -5791,9 +5947,9 @@ function horasSueldoSimuladoPorMes() {
 // Costo real por hora de trabajo: el valor hora configurado (state.config.valorHora,
 // reutilizado — es el mismo campo que ya existía para "mano de obra") más los
 // gastos fijos ya prorateados por hora productiva (costoFijoPorHoraProductiva,
-// función existente, antes sin uso).
+// función existente).
 function costoHoraSueldoSimulado() {
-  return state.config.valorHora || 0;
+  return (state.config.valorHora || 0) + costoFijoPorHoraProductiva();
 }
 
 function sueldoMensualSimulado() {
@@ -5818,7 +5974,10 @@ function calcularMargenConSueldoSimulado(nombreProducto) {
   if (!costo || !precioVenta) return null;
 
   const costoManoObra = costoManoDeObraUnitReceta(receta);
-  const costoConSueldo = costo.costoRealUnit + costoManoObra;
+  // costoManoObra ya incluye el gasto fijo prorrateado (vía costoHoraSueldoSimulado),
+  // así que acá restamos costo.costoFijoUnit para no sumarlo dos veces (una desde
+  // calcularCostoReceta y otra desde costoManoObra).
+  const costoConSueldo = (costo.costoRealUnit - costo.costoFijoUnit) + costoManoObra;
 
   const margenActual = precioVenta - costo.costoRealUnit;
   const margenActualPct = precioVenta > 0 ? (margenActual / precioVenta) * 100 : null;
@@ -5840,11 +5999,10 @@ function calcularTodosMargenesConSueldoSimulado() {
 }
 
 // Desglose de costo real de una receta, por unidad de venta.
-// Por ahora sólo considera materia prima (+ ajuste por merma): todavía no
-// tenemos el tiempo real de cada receta cargado, así que mano de obra, gas
-// y gastos fijos quedan fuera del cálculo hasta que se pueda medir bien.
-// (costoGasPorMinuto / costoFijoPorHoraProductiva quedan definidas más abajo
-// para cuando se retome ese cálculo más adelante.)
+// Siempre incluye materia prima (+ ajuste por merma). Si la receta tiene
+// tiempoMinutos cargado (además de rinde), también suma gas y gastos fijos
+// prorrateados por unidad. Si no tiene tiempoMinutos, el cálculo queda
+// idéntico al de antes (solo materia prima) — no se asume un tiempo default.
 function calcularCostoReceta(receta) {
   if (!receta || !receta.rinde) return null;
 
@@ -5858,11 +6016,22 @@ function calcularCostoReceta(receta) {
   const subtotalUnit = materiaPrimaUnit;
   const mermaPct = receta.mermaPct || 0;
   const factorMerma = mermaPct > 0 ? 1 / (1 - mermaPct / 100) : 1;
-  const costoRealUnit = subtotalUnit * factorMerma;
+  const costoMateriaPrimaUnit = subtotalUnit * factorMerma;
+
+  let costoGasUnit = 0;
+  let costoFijoUnit = 0;
+  if (receta.tiempoMinutos) {
+    costoGasUnit = (costoGasPorMinuto() * receta.tiempoMinutos) / receta.rinde;
+    costoFijoUnit = (costoFijoPorHoraProductiva() * (receta.tiempoMinutos / 60)) / receta.rinde;
+  }
+
+  const costoRealUnit = costoMateriaPrimaUnit + costoGasUnit + costoFijoUnit;
 
   return {
     materiaPrimaUnit,
-    subtotalUnit, factorMerma, costoRealUnit,
+    subtotalUnit, factorMerma,
+    costoGasUnit, costoFijoUnit,
+    costoRealUnit,
   };
 }
 
@@ -5945,6 +6114,7 @@ function datosFaltantesReceta(receta) {
   if (!receta) return ['la receta'];
   const faltan = [];
   if (!receta.rinde) faltan.push('rinde de la receta');
+  if (!receta.tiempoMinutos) faltan.push('tiempoMinutos de la receta');
   if (!receta.ingredientes || receta.ingredientes.length === 0) faltan.push('ingredientes cargados');
   // calcularCostoReceta suma como $0 cualquier ingrediente sin costoUnitario cargado
   // (o ya eliminado de Stock), lo que puede mostrar un margen "válido" pero falso.
@@ -6006,13 +6176,17 @@ function openMargenRecetaModal(nombreProducto) {
     <div class="detail-row"><span class="label">Precio de venta</span><span class="value">${m.precioVenta ? fmt(m.precioVenta) : '— sin precio en catálogo'}</span></div>
     <div class="detail-row"><span class="label">🧂 Materia prima</span><span class="value">${fmt(m.materiaPrimaUnit)}</span></div>
     ${m.factorMerma > 1 ? `<div class="detail-row"><span class="label">📉 Ajuste por merma</span><span class="value">×${m.factorMerma.toFixed(2)}</span></div>` : ''}
+    ${(m.costoGasUnit > 0 || m.costoFijoUnit > 0) ? `
+    <div class="detail-row"><span class="label">🔥 Gas</span><span class="value">${fmt(m.costoGasUnit)}</span></div>
+    <div class="detail-row"><span class="label">🏠 Gastos fijos</span><span class="value">${fmt(m.costoFijoUnit)}</span></div>
+    ` : ''}
     <div class="detail-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:8px">
-      <span class="label fw-600">Costo materia prima</span><span class="value fw-600">${fmt(m.costoRealUnit)}</span>
+      <span class="label fw-600">Costo real por unidad</span><span class="value fw-600">${fmt(m.costoRealUnit)}</span>
     </div>
     ${m.margen !== null ? `
       <div class="detail-row"><span class="label fw-600">${m.margen >= 0 ? 'Ganancia' : 'Pérdida'}</span><span class="value fw-600" style="color:${c.color}">${fmt(m.margen)} (${m.margen >= 0 ? '+' : ''}${m.margenPct.toFixed(0)}%)</span></div>
     ` : `<div class="detail-row"><span class="label fw-600">Margen</span><span class="value" style="color:var(--text3)">Sin precio de venta cargado</span></div>`}
-    <div style="font-size:11px;color:var(--text3);margin-top:6px">💡 Por ahora el costo sólo incluye materia prima. Mano de obra, gas y gastos fijos se sumarán más adelante cuando tengamos el tiempo real de cada receta.</div>
+    ${(m.costoGasUnit === 0 && m.costoFijoUnit === 0) ? `<div style="font-size:11px;color:var(--text3);margin-top:6px">💡 El costo sólo incluye materia prima porque falta el tiempo de la receta. Cargalo para sumar gas y gastos fijos.</div>` : ''}
     <div class="modal-actions"><button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button></div>
   `);
 }
@@ -6107,6 +6281,7 @@ function initIngNombreAutocomplete(editingId) {
 let finanzasVista = 'lista'; // 'lista' | 'dia' | 'calendario' | 'reportes'
 let finanzasDiaExpandido = null;
 let repartoMovId = null; // id del movimiento de ingreso seleccionado en el desglose de reparto (Reportes)
+let cierreSemanaSel = 'actual'; // 'actual' | 'anterior' — selector del modal "Cierre de la semana" (Reportes)
 
 // Presets de reparto por "etapa" del negocio — pensado para que Sofía/Juan
 // puedan elegir manualmente cuál usar a medida que el negocio crece (botones
@@ -6312,7 +6487,10 @@ function renderFinanzas() {
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px;flex-wrap:wrap">
       <div class="section-sub" style="margin-bottom:0">Resumen de tus ingresos y egresos</div>
-      <button class="btn btn-ghost btn-sm" onclick="openBuscarDuplicados('movimientos')">🔍 Duplicados</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="openExportarFinanzas()">📄 Exportar</button>
+        <button class="btn btn-ghost btn-sm" onclick="openBuscarDuplicados('movimientos')">🔍 Duplicados</button>
+      </div>
     </div>
     <div class="summary-grid">
       <div class="summary-card">
@@ -6480,6 +6658,14 @@ function renderReportes() {
   const maxCantGanancia = Math.max(1, ...topGanancia.map(t => t.cantidad));
 
   return `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-bottom:16px;box-shadow:var(--shadow);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      <div>
+        <div style="font-weight:700;font-size:14px;color:var(--text)">📤 Cierre de la semana</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">Armá un resumen (ingresos, egresos, neto y reparto) para compartir por WhatsApp</div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="openCierreSemana()">📤 Cierre de la semana</button>
+    </div>
+
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-bottom:16px;box-shadow:var(--shadow)">
       <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:10px">Ingresos vs egresos · últimas 8 semanas</div>
       ${renderBarChartFinanzas(semanas)}
@@ -6516,6 +6702,426 @@ function renderReportes() {
     ${renderReporteSueldoSimulado()}
     ${renderReporteReparto()}
   `;
+}
+
+// ------------------------------------------------------------------
+// "📤 Cierre de la semana" (Finanzas > Reportes) — resumen de texto plano
+// (mismo criterio que compartirPedidoWhatsApp: sin HTML, sólo texto) con
+// ingresos/egresos/neto de los últimos 7 días (o los 7 anteriores a esos)
+// y el reparto de state.config.reparto ya aplicado en pesos sobre el neto.
+// Es sólo lectura/agregación de state.movimientos: no crea, edita ni borra
+// ningún movimiento, ni toca calcularGananciaPedido/generarIngresoAutoSiEntregado.
+// ------------------------------------------------------------------
+
+// Rango de fechas ("YYYY-MM-DD") de la semana pedida.
+// 'actual'   -> últimos 7 días, incluyendo hoy (hoy-6 .. hoy)
+// 'anterior' -> los 7 días previos a esos (hoy-13 .. hoy-7)
+function rangoSemanaCierre(sel) {
+  const finActual = todayStr();
+  const inicioActual = addDiasStr(finActual, -6);
+  if (sel === 'anterior') {
+    const fin = addDiasStr(inicioActual, -1);
+    const inicio = addDiasStr(fin, -6);
+    return { inicio, fin };
+  }
+  return { inicio: inicioActual, fin: finActual };
+}
+
+function movimientosEnRango(inicio, fin) {
+  return state.movimientos.filter(m => m.fecha >= inicio && m.fecha <= fin);
+}
+
+// Calcula ingresos/egresos/neto del rango (misma lógica de suma que el
+// resto de Finanzas: filtrar por m.tipo y sumar m.monto) y el reparto en
+// pesos sobre ese neto. El último rubro (colchón) se calcula por resta en
+// vez de redondear, para que los 4 rubros sumen EXACTO el neto (sin perder
+// ni sobrar centavos por redondeos independientes).
+// Aplica los % de state.config.reparto sobre un neto en pesos. El último
+// rubro (colchón) sale por resta en vez de redondear, para que los 4 rubros
+// sumen EXACTO el neto (sin perder ni sobrar centavos por redondeos
+// independientes). Compartida entre "Cierre de la semana" y "Exportar"
+// (Finanzas) para no duplicar el criterio en dos lados.
+function calcularRepartoPesos(neto, rCustom) {
+  const r = rCustom || state.config.reparto || { materiaPrima: 55, ahorro: 25, sueldo: 15, colchon: 5 };
+  const materiaPrima = Math.round(neto * r.materiaPrima / 100);
+  const ahorro = Math.round(neto * r.ahorro / 100);
+  const sueldo = Math.round(neto * r.sueldo / 100);
+  const colchon = neto - materiaPrima - ahorro - sueldo; // resto exacto
+  return { materiaPrima, ahorro, sueldo, colchon, r };
+}
+
+function calcularCierreSemana(sel) {
+  const { inicio, fin } = rangoSemanaCierre(sel);
+  const movs = movimientosEnRango(inicio, fin);
+  const ingresos = movs.filter(m => m.tipo === 'income').reduce((s, m) => s + m.monto, 0);
+  const egresos = movs.filter(m => m.tipo === 'expense').reduce((s, m) => s + m.monto, 0);
+  const neto = ingresos - egresos;
+
+  const { materiaPrima, ahorro, sueldo, colchon, r } = calcularRepartoPesos(neto);
+
+  return { inicio, fin, ingresos, egresos, neto, r, reparto: { materiaPrima, ahorro, sueldo, colchon } };
+}
+
+function textoCierreSemana(sel) {
+  const d = calcularCierreSemana(sel);
+  const rangoTxt = d.inicio === d.fin ? fmtDate(d.inicio) : `${fmtDate(d.inicio)} al ${fmtDate(d.fin)}`;
+  const { reparto, r } = d;
+
+  return `💰 *Cierre semana* — ${rangoTxt}
+
+Ingresos: ${fmt(d.ingresos)}
+Egresos: ${fmt(d.egresos)}
+Neto: ${fmt(d.neto)}
+
+📊 Reparto sugerido:
+🧂 Materia prima: ${fmt(reparto.materiaPrima)} (${r.materiaPrima}%)
+🐖 Ahorro: ${fmt(reparto.ahorro)} (${r.ahorro}%)
+👩‍🍳 Sueldo: ${fmt(reparto.sueldo)} (${r.sueldo}%)
+🛟 Colchón: ${fmt(reparto.colchon)} (${r.colchon}%)`;
+}
+
+function renderCierreSemanaModal() {
+  const d = calcularCierreSemana(cierreSemanaSel);
+  const rangoTxt = d.inicio === d.fin ? fmtDate(d.inicio) : `${fmtDate(d.inicio)} al ${fmtDate(d.fin)}`;
+  const texto = textoCierreSemana(cierreSemanaSel);
+
+  const tabBtn = (sel, label) => `
+    <div onclick="setCierreSemanaSel('${sel}')"
+      style="flex:1;text-align:center;padding:8px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;
+        border:2px solid ${cierreSemanaSel === sel ? 'var(--accent)' : 'var(--border)'};
+        background:${cierreSemanaSel === sel ? 'var(--accent-light)' : 'var(--surface)'};
+        color:${cierreSemanaSel === sel ? 'var(--accent)' : 'var(--text2)'}">${label}</div>`;
+
+  return `
+    <div class="modal-title">📤 Cierre de la semana</div>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      ${tabBtn('actual', 'Semana actual')}
+      ${tabBtn('anterior', 'Semana anterior')}
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:14px">${rangoTxt}</div>
+
+    <div class="detail-row"><span class="label">Ingresos</span><span class="value" style="color:var(--green)">${fmt(d.ingresos)}</span></div>
+    <div class="detail-row"><span class="label">Egresos</span><span class="value" style="color:var(--red)">${fmt(d.egresos)}</span></div>
+    <div class="detail-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:10px">
+      <span class="label fw-600">Neto</span>
+      <span class="value fw-600" style="color:${d.neto >= 0 ? 'var(--green)' : 'var(--red)'}">${fmt(d.neto)}</span>
+    </div>
+
+    <div class="divider"></div>
+
+    <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:10px;margin-bottom:14px;white-space:pre-wrap;font-size:12px;line-height:1.5;color:var(--text2);font-family:inherit">${esc(texto)}</div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="copiarCierreSemana()">📋 Copiar</button>
+      <button class="btn btn-primary w-100" onclick="compartirCierreSemanaWhatsApp()">📱 WhatsApp</button>
+    </div>
+  `;
+}
+
+function openCierreSemana() {
+  openModal(renderCierreSemanaModal());
+}
+
+function setCierreSemanaSel(sel) {
+  cierreSemanaSel = sel;
+  openModal(renderCierreSemanaModal());
+}
+
+function compartirCierreSemanaWhatsApp() {
+  const texto = textoCierreSemana(cierreSemanaSel);
+  // Sin número fijo, igual que compartirPedidoWhatsApp cuando no hay teléfono:
+  // que el usuario elija a quién mandárselo desde WhatsApp.
+  const url = `https://wa.me/?text=${encodeURIComponent(texto)}`;
+  window.open(url, '_blank');
+}
+
+function copiarCierreSemana() {
+  const texto = textoCierreSemana(cierreSemanaSel);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(texto)
+      .then(() => showToast('📋 Texto copiado'))
+      .catch(() => showToast('⚠️ No se pudo copiar'));
+  } else {
+    showToast('⚠️ No se pudo copiar');
+  }
+}
+
+// ------------------------------------------------------------------
+// "📄 Exportar" (Finanzas) — descarga los movimientos de un rango de
+// fechas elegido como PDF o Excel (.xlsx), para mandarle un resumen a
+// un contador, tener un respaldo externo o imprimir. Es SOLO LECTURA
+// sobre state.movimientos: no crea, edita ni borra nada, ni dispara
+// persistItem/saveState. Las librerías (jsPDF y SheetJS) se cargan
+// bajo demanda la primera vez que se usan, igual que Tesseract.js en
+// "Importar" (cargarTesseract), para no inflar el peso inicial de la app.
+// ------------------------------------------------------------------
+
+let exportFinanzasFormato = 'pdf';
+
+// Rango por defecto al abrir el modal: del 1° del mes actual a hoy.
+function rangoMesActualExport() {
+  const hoy = todayStr();
+  const inicio = hoy.slice(0, 8) + '01';
+  return { inicio, fin: hoy };
+}
+
+function openExportarFinanzas() {
+  exportFinanzasFormato = 'pdf';
+  openModal(renderExportarFinanzasModal());
+}
+
+function renderExportarFinanzasModal() {
+  const { inicio, fin } = rangoMesActualExport();
+  const formatoBtn = (val, label) => `
+    <div onclick="setExportFinanzasFormato('${val}')"
+      style="flex:1;text-align:center;padding:10px;border-radius:var(--radius-sm);font-size:13px;font-weight:700;cursor:pointer;transition:all .15s;
+        border:2px solid ${exportFinanzasFormato === val ? 'var(--accent)' : 'var(--border)'};
+        background:${exportFinanzasFormato === val ? 'var(--accent-light)' : 'var(--surface)'};
+        color:${exportFinanzasFormato === val ? 'var(--accent)' : 'var(--text2)'}">${label}</div>`;
+
+  return `
+    <div class="modal-title">📄 Exportar movimientos</div>
+    <div style="font-size:11.5px;color:var(--text3);margin-bottom:14px">Elegí el período y el formato del archivo a descargar.</div>
+
+    <div class="form-group">
+      <label class="form-label">Desde</label>
+      <input class="form-input" id="f-export-desde" type="date" value="${inicio}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Hasta</label>
+      <input class="form-input" id="f-export-hasta" type="date" value="${fin}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Formato</label>
+      <div style="display:flex;gap:8px">
+        ${formatoBtn('pdf', '📕 PDF')}
+        ${formatoBtn('xlsx', '📗 Excel')}
+      </div>
+    </div>
+
+    <div id="export-finanzas-status" style="font-size:11.5px;color:var(--text3);min-height:16px;margin-bottom:6px"></div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary w-100" id="btn-export-finanzas-confirm" onclick="confirmExportarFinanzas()">⬇️ Descargar</button>
+    </div>
+  `;
+}
+
+// Cambia el formato elegido sin perder las fechas que el usuario ya haya tocado.
+function setExportFinanzasFormato(f) {
+  exportFinanzasFormato = f;
+  const desde = document.getElementById('f-export-desde')?.value;
+  const hasta = document.getElementById('f-export-hasta')?.value;
+  openModal(renderExportarFinanzasModal());
+  if (desde) document.getElementById('f-export-desde').value = desde;
+  if (hasta) document.getElementById('f-export-hasta').value = hasta;
+}
+
+// Saca saltos de línea, tabs y espacios repetidos de un texto libre (ej.
+// descripción de un movimiento) para que no rompa el formato de una fila
+// de tabla en el PDF o el Excel. No es esc() (esto no es HTML).
+function saneaTextoExport(str) {
+  return String(str || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Filas [fecha, descripción, tipo, monto, ganancia] listas para pintar en
+// la tabla del PDF/Excel. SOLO LECTURA sobre state.movimientos. La ganancia
+// usa gananciaPesosMovimiento (misma lógica que el resto de Finanzas) y
+// queda vacía ('') cuando no aplica (egreso, o ingreso sin receta cargada)
+// — nunca se fuerza a $0, para no mentir un margen que no se pudo calcular.
+function filasExportFinanzas(movs) {
+  return movs.map(m => {
+    const pesos = gananciaPesosMovimiento(m);
+    return {
+      fecha: fmtDate(m.fecha),
+      descripcion: saneaTextoExport(m.descripcion),
+      tipo: m.tipo === 'income' ? 'Ingreso' : 'Egreso',
+      monto: Math.round(m.monto),
+      ganancia: pesos !== null ? Math.round(pesos) : '',
+    };
+  });
+}
+
+// Totales del período — misma lógica de suma (filtrar por m.tipo, sumar
+// m.monto) que usa el resto de Finanzas, para que coincida con lo que se
+// ve en pantalla.
+function totalesExportFinanzas(movs) {
+  const ingresos = movs.filter(m => m.tipo === 'income').reduce((s, m) => s + m.monto, 0);
+  const egresos = movs.filter(m => m.tipo === 'expense').reduce((s, m) => s + m.monto, 0);
+  return { ingresos, egresos, neto: ingresos - egresos };
+}
+
+function nombreArchivoExportFinanzas(desde, hasta, ext) {
+  return `toque-artesano-finanzas-${desde}-a-${hasta}.${ext}`;
+}
+
+async function confirmExportarFinanzas() {
+  const desde = document.getElementById('f-export-desde').value;
+  const hasta = document.getElementById('f-export-hasta').value;
+  const status = document.getElementById('export-finanzas-status');
+  const btn = document.getElementById('btn-export-finanzas-confirm');
+
+  if (!desde || !hasta) {
+    if (status) status.textContent = '⚠️ Elegí ambas fechas.';
+    return;
+  }
+  if (desde > hasta) {
+    if (status) status.textContent = '⚠️ "Desde" no puede ser posterior a "Hasta".';
+    return;
+  }
+
+  // Solo lectura: filtra state.movimientos, no lo modifica.
+  const movs = movimientosEnRango(desde, hasta).slice().sort((a, b) => a.fecha.localeCompare(b.fecha));
+  if (movs.length === 0) {
+    if (status) status.textContent = 'ℹ️ Sin movimientos en el período elegido.';
+    return;
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Generando...'; }
+
+  try {
+    if (exportFinanzasFormato === 'pdf') {
+      if (status) status.textContent = '⏳ Cargando generador de PDF...';
+      await cargarJsPDF();
+      generarPDFFinanzas(desde, hasta, movs);
+    } else {
+      if (status) status.textContent = '⏳ Cargando generador de Excel...';
+      await cargarXLSX();
+      generarExcelFinanzas(desde, hasta, movs);
+    }
+    showToast('✅ Archivo descargado');
+    closeModal();
+  } catch (e) {
+    console.error('[Exportar Finanzas] Error', e);
+    if (status) status.textContent = '⚠️ ' + (e.message || 'No se pudo generar el archivo.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⬇️ Descargar'; }
+  }
+}
+
+// Carga jsPDF + el plugin autoTable bajo demanda (solo al exportar a PDF
+// por primera vez), igual que cargarTesseract() para el OCR de "Importar".
+let _jsPDFCargando = null;
+function cargarJsPDF() {
+  if (window.jspdf && window.jspdf.jsPDF) return Promise.resolve();
+  if (_jsPDFCargando) return _jsPDFCargando;
+  _jsPDFCargando = new Promise((resolve, reject) => {
+    const s1 = document.createElement('script');
+    s1.src = 'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js';
+    s1.onload = () => {
+      const s2 = document.createElement('script');
+      s2.src = 'https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js';
+      s2.onload = () => resolve();
+      s2.onerror = () => { _jsPDFCargando = null; reject(new Error('No se pudo cargar el generador de PDF (revisá tu conexión)')); };
+      document.head.appendChild(s2);
+    };
+    s1.onerror = () => { _jsPDFCargando = null; reject(new Error('No se pudo cargar el generador de PDF (revisá tu conexión)')); };
+    document.head.appendChild(s1);
+  });
+  return _jsPDFCargando;
+}
+
+// Carga SheetJS (xlsx) bajo demanda, solo al exportar a Excel por primera vez.
+let _xlsxCargando = null;
+function cargarXLSX() {
+  if (window.XLSX) return Promise.resolve();
+  if (_xlsxCargando) return _xlsxCargando;
+  _xlsxCargando = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    script.onload = () => resolve();
+    script.onerror = () => { _xlsxCargando = null; reject(new Error('No se pudo cargar el generador de Excel (revisá tu conexión)')); };
+    document.head.appendChild(script);
+  });
+  return _xlsxCargando;
+}
+
+// Genera y descarga el PDF (Blob + link temporal, manejado internamente por
+// jsPDF con doc.save()). No sube nada a Firebase.
+function generarPDFFinanzas(desde, hasta, movs) {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  const filas = filasExportFinanzas(movs);
+  const totales = totalesExportFinanzas(movs);
+
+  doc.setFontSize(13);
+  doc.text(`Toque Artesano de Sofi — Movimientos ${fmtDate(desde)} al ${fmtDate(hasta)}`, 14, 16);
+
+  doc.autoTable({
+    startY: 22,
+    head: [['Fecha', 'Descripción', 'Tipo', 'Monto', 'Ganancia']],
+    body: filas.map(f => [
+      f.fecha,
+      f.descripcion,
+      f.tipo,
+      fmt(f.monto),
+      f.ganancia === '' ? '' : fmt(f.ganancia),
+    ]),
+    styles: { fontSize: 9, cellPadding: 3 },
+    headStyles: { fillColor: [232, 168, 124] },
+    columnStyles: { 1: { cellWidth: 70 } },
+  });
+
+  const y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : 22) + 10;
+  doc.setFontSize(10);
+  doc.text(`Total ingresos: ${fmt(totales.ingresos)}`, 14, y);
+  doc.text(`Total egresos: ${fmt(totales.egresos)}`, 14, y + 6);
+  doc.setFont(undefined, 'bold');
+  doc.text(`Saldo neto del período: ${fmt(totales.neto)}`, 14, y + 14);
+  doc.setFont(undefined, 'normal');
+
+  doc.save(nombreArchivoExportFinanzas(desde, hasta, 'pdf'));
+}
+
+// Genera y descarga el Excel (Blob + link temporal, manejado internamente
+// por SheetJS con XLSX.writeFile()). No sube nada a Firebase. Incluye una
+// segunda hoja opcional con el reparto sugerido sobre el neto del período,
+// reusando calcularRepartoPesos (misma función que "Cierre de la semana")
+// para no duplicar ese criterio.
+function generarExcelFinanzas(desde, hasta, movs) {
+  const filas = filasExportFinanzas(movs);
+  const totales = totalesExportFinanzas(movs);
+
+  const aoa = [
+    [`Toque Artesano de Sofi — Movimientos ${fmtDate(desde)} al ${fmtDate(hasta)}`],
+    [],
+    ['Fecha', 'Descripción', 'Tipo', 'Monto', 'Ganancia'],
+    ...filas.map(f => [f.fecha, f.descripcion, f.tipo, f.monto, f.ganancia]),
+    [],
+    ['', '', '', 'Total ingresos', Math.round(totales.ingresos)],
+    ['', '', '', 'Total egresos', Math.round(totales.egresos)],
+    ['', '', '', 'Saldo neto del período', Math.round(totales.neto)],
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{ wch: 12 }, { wch: 32 }, { wch: 10 }, { wch: 14 }, { wch: 14 }];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Movimientos');
+
+  // Hoja de reparto: solo tiene sentido si quedó un neto positivo para repartir.
+  if (totales.neto > 0) {
+    const rep = calcularRepartoPesos(totales.neto);
+    const aoaReparto = [
+      [`Reparto sugerido sobre el neto del período (${fmtDate(desde)} al ${fmtDate(hasta)})`],
+      [],
+      ['Rubro', '%', 'Monto'],
+      ['Materia prima', rep.r.materiaPrima, Math.round(rep.materiaPrima)],
+      ['Ahorro', rep.r.ahorro, Math.round(rep.ahorro)],
+      ['Sueldo', rep.r.sueldo, Math.round(rep.sueldo)],
+      ['Colchón', rep.r.colchon, Math.round(rep.colchon)],
+      [],
+      ['Neto', '', Math.round(totales.neto)],
+    ];
+    const wsReparto = XLSX.utils.aoa_to_sheet(aoaReparto);
+    wsReparto['!cols'] = [{ wch: 20 }, { wch: 8 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, wsReparto, 'Reparto sugerido');
+  }
+
+  XLSX.writeFile(wb, nombreArchivoExportFinanzas(desde, hasta, 'xlsx'));
 }
 
 // ------------------------------------------------------------------
@@ -7704,6 +8310,35 @@ function renderAtrasadosBanner() {
         </div>
       </div>
       <button class="btn btn-primary btn-sm" style="background:var(--red)" onclick="navigate('pedidos')">Ver pedidos</button>
+    </div>
+  </div>`;
+}
+
+// Card de alerta en Inicio: ingredientes cuyo stock actual no alcanza para
+// los pedidos ya agendados (no entregados) de los próximos 7 días.
+// No ocupa espacio si no hay nada comprometido.
+function renderStockComprometidoBanner() {
+  const faltantes = calcularStockComprometido();
+  if (faltantes.length === 0) return '';
+
+  const MAX_MOSTRADOS = 3;
+  const items = faltantes.slice(0, MAX_MOSTRADOS)
+    .map(f => `<div style="font-size:12px;color:var(--text2);margin-top:2px">• <b>${esc(f.ingrediente)}</b> no alcanza para los pedidos de esta semana (falta ${f.faltante} ${esc(f.unidad)})</div>`)
+    .join('');
+  const resto = faltantes.length - MAX_MOSTRADOS;
+  const restoTxt = resto > 0 ? `<div style="font-size:12px;color:var(--text2);margin-top:2px">y ${resto} más...</div>` : '';
+
+  return `<div class="card" style="background:var(--red-light);border-color:var(--red);margin-bottom:12px">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div style="display:flex;align-items:flex-start;gap:8px">
+        <span style="font-size:20px">⚠️</span>
+        <div>
+          <div style="font-weight:600;font-size:13px;color:var(--red)">Stock ajustado para los próximos 7 días</div>
+          ${items}
+          ${restoTxt}
+        </div>
+      </div>
+      <button class="btn btn-primary btn-sm" style="background:var(--red)" onclick="navigateCostos('ingredientes')">Ver stock</button>
     </div>
   </div>`;
 }

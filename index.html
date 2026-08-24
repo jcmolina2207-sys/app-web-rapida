@@ -20,6 +20,8 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<!-- Lucide icons: familia de iconos moderna y consistente para reemplazar los emojis -->
+<script src="https://unpkg.com/lucide@latest"></script>
 <style>
   /* ============================
      CSS VARIABLES & RESET
@@ -145,13 +147,26 @@
     transition: color var(--transition), transform var(--transition);
     -webkit-tap-highlight-color: transparent;
   }
-  .nav-item .nav-icon { font-size: 22px; line-height: 1; }
+  .nav-item .nav-icon { font-size: 22px; line-height: 1; display: flex; align-items: center; justify-content: center; }
+  .nav-item .nav-icon svg { width: 22px; height: 22px; stroke-width: 1.8; }
   .nav-item .nav-label { font-size: 10px; font-weight: 500; letter-spacing: .3px; }
   .nav-item { color: var(--text3); }
   .nav-item.active { color: var(--accent); }
   .nav-item:active { transform: scale(.92); }
   .sidebar-brand { display: none; }
   .sidebar-footer { display: none; }
+
+  /* Iconos modernos (Lucide) reemplazando emojis en header y tarjetas */
+  .header-icon-btn {
+    background: none; border: none; cursor: pointer; padding: 6px;
+    border-radius: 50%; transition: background .2s;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text2);
+  }
+  .header-icon-btn:hover { background: var(--bg); }
+  .header-icon-btn svg { width: 21px; height: 21px; stroke-width: 1.8; }
+  .card-icon svg { width: 19px; height: 19px; stroke-width: 1.8; }
+  .activity-icon svg, .quick-action-icon svg { width: 17px; height: 17px; stroke-width: 1.8; }
 
   /* ============================
      FAB
@@ -535,6 +550,62 @@
   .dash-change.neg { color: var(--red); }
   .dash-change.neu { color: var(--text3); }
 
+  /* Nuevos bloques del Inicio: en mobile se apilan (sin grid), cada .card
+     ya trae su propio margin-bottom para separarse del siguiente. */
+  .dash-top-grid, .dash-lower-grid { display: block; }
+
+  .activity-list { display: flex; flex-direction: column; }
+  .activity-item {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 10px 0; border-bottom: 1px solid var(--border);
+  }
+  .activity-item:last-child { border-bottom: none; padding-bottom: 0; }
+  .activity-icon {
+    width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .act-icon-act-green { background: var(--green-light); color: var(--green); }
+  .act-icon-act-orange { background: var(--yellow-light); color: var(--yellow); }
+  .act-icon-act-yellow { background: var(--yellow-light); color: var(--yellow); }
+  .activity-body { flex: 1; min-width: 0; }
+  .activity-title { font-size: 13.5px; font-weight: 600; color: var(--text); }
+  .activity-sub {
+    font-size: 12.5px; color: var(--text2); margin-top: 1px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .activity-date { font-size: 11.5px; color: var(--text3); flex-shrink: 0; white-space: nowrap; margin-top: 2px; }
+
+  .quick-actions-list { display: flex; flex-direction: column; gap: 8px; }
+  .quick-action-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: var(--radius-sm, 10px);
+    background: var(--bg); border: 1px solid var(--border);
+    cursor: pointer; text-align: left; font-family: inherit;
+    font-size: 13.5px; font-weight: 500; color: var(--accent);
+    transition: background .2s;
+  }
+  .quick-action-item:hover { background: var(--accent-light); }
+  .quick-action-item:active { transform: scale(.98); }
+  .quick-action-icon {
+    width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--surface); color: var(--accent);
+  }
+  .quick-action-chevron { margin-left: auto; width: 16px; height: 16px; color: var(--text3); }
+
+  .tip-banner {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--accent-light); border-radius: var(--radius, 14px);
+    padding: 14px 16px; margin-bottom: 12px;
+  }
+  .tip-icon {
+    width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+    background: var(--surface); color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .tip-title { font-size: 12.5px; font-weight: 700; color: var(--accent); margin-bottom: 2px; }
+  .tip-text { font-size: 13px; color: var(--text2); line-height: 1.4; }
+
   /* ============================
      PEDIDO DETAIL CARD
   ============================ */
@@ -696,6 +767,7 @@
       width: 100%;
     }
     .nav-item .nav-icon { font-size: 19px; }
+    .nav-item .nav-icon svg { width: 19px; height: 19px; }
     .nav-item .nav-label { font-size: 14px; font-weight: 500; }
     .nav-item.active { background: var(--accent-light); color: var(--accent); }
     .nav-item:hover:not(.active) { background: var(--bg); }
@@ -745,6 +817,10 @@
     .dash-grid { display: grid !important; grid-template-columns: 1fr 1fr; gap: 16px; }
     .dash-grid > .card { margin-bottom: 0; }
     .dash-grid > .card.full-width { grid-column: 1 / -1; }
+    .dash-top-grid { display: grid !important; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 16px; }
+    .dash-top-grid > .card { margin-bottom: 0; }
+    .dash-lower-grid { display: grid !important; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .dash-lower-grid > .card { margin-bottom: 0; }
     .list-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .list-2col > * { margin-bottom: 0 !important; }
     .fab { bottom: 28px; right: 28px; }
@@ -939,27 +1015,27 @@
   <!-- BOTTOM NAV / SIDEBAR -->
   <nav class="bottom-nav" id="bottom-nav-placeholder">
     <button class="nav-item active" data-screen="inicio">
-      <span class="nav-icon">🏠</span>
+      <span class="nav-icon"><i data-lucide="home"></i></span>
       <span class="nav-label">Inicio</span>
     </button>
     <button class="nav-item" data-screen="pedidos">
-      <span class="nav-icon">📦</span>
+      <span class="nav-icon"><i data-lucide="shopping-bag"></i></span>
       <span class="nav-label">Pedidos</span>
     </button>
     <button class="nav-item" data-screen="costos">
-      <span class="nav-icon">🧾</span>
-      <span class="nav-label">Costos</span>
+      <span class="nav-icon"><i data-lucide="package"></i></span>
+      <span class="nav-label">Inventario</span>
     </button>
     <button class="nav-item" data-screen="finanzas">
-      <span class="nav-icon">💰</span>
+      <span class="nav-icon"><i data-lucide="wallet"></i></span>
       <span class="nav-label">Finanzas</span>
     </button>
     <button class="nav-item" data-screen="notas">
-      <span class="nav-icon">📝</span>
+      <span class="nav-icon"><i data-lucide="notebook-pen"></i></span>
       <span class="nav-label">Notas</span>
     </button>
     <button class="nav-item" data-screen="clientes">
-      <span class="nav-icon">👥</span>
+      <span class="nav-icon"><i data-lucide="users"></i></span>
       <span class="nav-label">Clientes</span>
     </button>
     <div class="sidebar-footer">v1.0 · Toque Artesano</div>
@@ -974,9 +1050,13 @@
         <div class="app-header-title" id="header-screen-title">Inicio</div>
       </div>
       <div style="display:flex;align-items:center;gap:12px">
+        <button id="settings-btn" onclick="abrirBackupModal()" title="Configuración y backup"
+          class="header-icon-btn">
+          <i data-lucide="settings"></i>
+        </button>
         <button id="bell-btn" onclick="toggleNotificaciones()" title="Notificaciones"
-          style="background:none;border:none;cursor:pointer;font-size:22px;padding:4px;border-radius:50%;transition:background .2s;position:relative">
-          🔔
+          class="header-icon-btn" style="position:relative">
+          <i data-lucide="bell"></i>
           <span id="bell-dot" style="display:none;position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:var(--red);border:2px solid #fff"></span>
         </button>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
@@ -1938,6 +2018,20 @@ document.getElementById('confirm-cancel').onclick = closeConfirm;
 /* ============================================================
    BACKUP: EXPORTAR / IMPORTAR
 ============================================================ */
+// Modal de Backup — reutiliza exportarDatos()/importarDatos() (misma lógica de
+// siempre). Se accede desde el ícono de engranaje del header: la función ya
+// no ocupa una tarjeta fija en el Inicio, pero sigue 100% disponible.
+function abrirBackupModal() {
+  openModal(`
+    <div class="modal-title">Backup de datos</div>
+    <div class="text-sm text-muted mb-12">Descargá una copia de seguridad o restaurá una anterior.</div>
+    <div class="flex gap-8" style="flex-wrap:wrap">
+      <button class="btn btn-secondary btn-sm" onclick="exportarDatos()">⬇️ Exportar datos</button>
+      <button class="btn btn-ghost btn-sm" onclick="importarDatos()">⬆️ Importar datos</button>
+    </div>
+  `);
+}
+
 function exportarDatos() {
   const backup = {
     pedidos: state.pedidos,
@@ -2080,7 +2174,7 @@ let activeScreen = 'inicio';
 
 const screenTitles = {
   inicio: 'Inicio', pedidos: 'Pedidos',
-  costos: 'Costos',
+  costos: 'Inventario',
   finanzas: 'Finanzas', notas: 'Anotaciones', clientes: 'Clientes'
 };
 function navigate(screen) {
@@ -2093,6 +2187,7 @@ function navigate(screen) {
   if (titleEl) titleEl.textContent = screenTitles[screen] || screen;
   activeScreen = screen;
   renderScreen(screen);
+  if (window.lucide) lucide.createIcons();
   closeFab();
 }
 
@@ -2192,6 +2287,57 @@ function renderCostos() {
 }
 
 /* -------- INICIO -------- */
+// Cantidad de pedidos que todavía no están en estado "Entregado".
+function pedidosPendientesCount() {
+  return state.pedidos.filter(p => p.estado !== 'done').length;
+}
+
+// "Actividad reciente": mezcla movimientos (ventas/compras, incluyendo el
+// ingreso automático que se genera al entregar un pedido) y notas, usando
+// SOLO datos reales que ya existen en el sistema (nada inventado). Se ordena
+// por _ts (marca de tiempo real de guardado, si el item ya sincronizó
+// alguna vez) y si no hay _ts, por fecha.
+function actividadReciente(limit = 6) {
+  const items = [];
+  state.movimientos.forEach(m => {
+    if (m.auto && m.pedidoId) {
+      items.push({ icon: 'package-check', cls: 'act-green', title: 'Pedido entregado',
+        sub: `${esc(m.descripcion)} · ${fmt(m.monto)}`, fecha: m.fecha, ts: m._ts || null });
+    } else if (m.tipo === 'income') {
+      items.push({ icon: 'shopping-cart', cls: 'act-green', title: 'Venta registrada',
+        sub: `${esc(m.descripcion)} · ${fmt(m.monto)}`, fecha: m.fecha, ts: m._ts || null });
+    } else {
+      items.push({ icon: 'shopping-basket', cls: 'act-orange', title: 'Compra registrada',
+        sub: `${esc(m.descripcion)} · ${fmt(m.monto)}`, fecha: m.fecha, ts: m._ts || null });
+    }
+  });
+  state.notas.forEach(n => {
+    const texto = n.texto || '';
+    items.push({ icon: 'notebook-pen', cls: 'act-yellow', title: 'Nota agregada',
+      sub: esc(texto.length > 60 ? texto.slice(0, 60) + '…' : texto), fecha: n.fecha, ts: n._ts || null });
+  });
+  items.sort((a, b) => {
+    const ta = a.ts || new Date(a.fecha + 'T00:00:00').getTime();
+    const tb = b.ts || new Date(b.fecha + 'T00:00:00').getTime();
+    return tb - ta;
+  });
+  return items.slice(0, limit);
+}
+
+// Fecha/hora legible para un item de actividad reciente. La hora sólo se
+// muestra si el item tiene _ts real (ya se sincronizó alguna vez); si no,
+// mostramos solo la fecha para no inventar una hora que no existe.
+function fmtActividadFecha(item) {
+  const hoy = todayStr();
+  const ayer = addDiasStr(hoy, -1);
+  const diaTxt = item.fecha === hoy ? 'Hoy' : item.fecha === ayer ? 'Ayer' : fmtDate(item.fecha);
+  if (item.ts) {
+    const hora = new Date(item.ts).toLocaleTimeString('es-AR', { hour: 'numeric', minute: '2-digit' });
+    return `${diaTxt}, ${hora}`;
+  }
+  return diaTxt;
+}
+
 function renderInicio() {
   const el = document.getElementById('screen-inicio');
   const now = new Date();
@@ -2199,13 +2345,22 @@ function renderInicio() {
   const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
   const fechaLarga = `${diasSemana[now.getDay()]}, ${now.getDate()} de ${meses[now.getMonth()]}`;
 
-  const prox = nextPedido();
+  const pendientes = pedidosPendientesCount();
+  const atrasados = pedidosAtrasados().length;
   const pct = globalStockPct();
   const saldo = totalSaldo();
   const cambio = cambioHoy();
-  const nota = lastNota();
   const cambioClass = cambio > 0 ? 'pos' : cambio < 0 ? 'neg' : 'neu';
   const cambioStr = cambio > 0 ? '+' + fmt(cambio) : cambio < 0 ? fmt(cambio) : '$0';
+  const actividad = actividadReciente(6);
+  const tips = [
+    'Llevá tu stock siempre al día para que no falte nada en tus recetas.',
+    'Registrá cada venta apenas la hagas: así el saldo siempre está al día.',
+    'Revisá los pedidos atrasados antes de empezar el día.',
+    'Anotá los pedidos especiales apenas te los piden, para no olvidarte.',
+    'Un cliente contento vuelve a pedir: seguí de cerca a los que te compran seguido.',
+  ];
+  const tipDelDia = tips[new Date().getDate() % tips.length];
 
   el.innerHTML = `
     <div class="dash-greeting">¡Hola SofiJuan! 👋</div>
@@ -2215,90 +2370,109 @@ function renderInicio() {
     ${renderStockComprometidoBanner()}
     ${renderGastosFijosBanner()}
     ${renderBackupBanner()}
-    <div class="dash-grid">
-    <!-- PRÓXIMO PEDIDO -->
-    <div class="card anim-in" style="${prox && esAtrasado(prox) ? 'border:1.5px solid var(--red);background:var(--red-light)' : ''}">
-      <div class="card-header">
-        <div class="card-title"><span class="card-icon">📦</span> Próximo pedido</div>
-      </div>
-      ${prox ? `
-        <div class="list-item-title">${prox.cliente}</div>
-        <div class="list-item-sub mb-8">${prox.producto}</div>
-        <div class="flex gap-8 mb-12" style="flex-wrap:wrap">
-          ${esAtrasado(prox) ? `<span class="badge badge-atrasado">⚠️ Atrasado</span>` : ''}
-          <span class="badge ${estadoBadge(prox.estado)}">${estadoLabel(prox.estado)}</span>
-          <span class="badge ${estadoPagoInfo(prox).badge}">${estadoPagoInfo(prox).label}</span>
-          <span class="text-sm text-muted">📅 ${fmtDate(prox.fechaEntrega)} ${prox.hora}</span>
+
+    <div class="dash-top-grid">
+      <!-- PEDIDOS PENDIENTES -->
+      <div class="card anim-in">
+        <div class="card-header">
+          <div class="card-title"><span class="card-icon"><i data-lucide="shopping-bag"></i></span> Pedidos pendientes</div>
         </div>
-        <div class="flex gap-8">
-          ${prox.estado !== 'done' ? `<button class="btn btn-primary btn-sm" onclick="marcarEntregado(${prox.id}, true)">✓ Entregar</button>` : '<span class="badge badge-done">Entregado</span>'}
-          <button class="btn btn-ghost btn-sm" onclick="navigate('pedidos')">Ver pedidos</button>
+        <div class="dash-saldo-big">${pendientes}</div>
+        <div class="text-sm text-muted mb-12">
+          ${pendientes === 0 ? '¡Todo al día! 🎉' : atrasados > 0 ? `⚠️ ${atrasados} atrasado${atrasados !== 1 ? 's' : ''}` : `${pendientes} pedido${pendientes !== 1 ? 's' : ''} en camino`}
         </div>
-      ` : `<div class="empty-state"><div class="empty-icon">😌</div><p>Sin pedidos pendientes</p></div>`}
+        <button class="btn btn-secondary btn-sm" onclick="navigate('pedidos')">Ver pedidos</button>
+      </div>
+
+      <!-- STOCK DE MATERIA PRIMA -->
+      <div class="card anim-in" style="animation-delay:.06s">
+        <div class="card-header">
+          <div class="card-title"><span class="card-icon"><i data-lucide="package"></i></span> Stock de materia prima</div>
+          <span style="font-size:18px;font-weight:700;color:${pct>=60?'var(--green)':pct>=30?'var(--yellow)':'var(--red)'}">${pct}%</span>
+        </div>
+        <div class="progress-wrap mb-8">
+          <div class="progress-bar ${stockColor(pct)}" style="width:${pct}%"></div>
+        </div>
+        <div class="text-sm text-muted mb-12">
+          ${pct >= 60 ? '✅ Stock en buen nivel' : pct >= 30 ? '⚠️ Stock bajo — revisar' : '🔴 Stock crítico — reponer urgente'}
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="navigateCostos('ingredientes')">Ver stock completo</button>
+      </div>
+
+      <!-- SALDO ACTUAL -->
+      <div class="card anim-in" style="animation-delay:.12s">
+        <div class="card-header">
+          <div class="card-title"><span class="card-icon"><i data-lucide="wallet"></i></span> Saldo actual</div>
+        </div>
+        <div class="dash-saldo-big">${fmt(saldo)}</div>
+        <div class="dash-change ${cambioClass} mb-12">Hoy: ${cambioStr}</div>
+        <button class="btn btn-secondary btn-sm" onclick="navigate('finanzas')">Ver movimientos</button>
+      </div>
     </div>
 
-    <!-- STOCK -->
-    <div class="card anim-in" style="animation-delay:.06s">
-      <div class="card-header">
-        <div class="card-title"><span class="card-icon">🧂</span> Materia prima</div>
-        <span style="font-size:18px;font-weight:700;color:${pct>=60?'var(--green)':pct>=30?'var(--yellow)':'var(--red)'}">${pct}%</span>
+    <div class="dash-lower-grid">
+      <!-- ACTIVIDAD RECIENTE -->
+      <div class="card anim-in" style="animation-delay:.18s">
+        <div class="card-header">
+          <div class="card-title"><span class="card-icon"><i data-lucide="history"></i></span> Actividad reciente</div>
+          <button class="btn btn-ghost btn-sm" onclick="navigate('finanzas')">Ver todo</button>
+        </div>
+        ${actividad.length ? `
+          <div class="activity-list">
+            ${actividad.map(a => `
+              <div class="activity-item">
+                <span class="activity-icon act-icon-${a.cls}"><i data-lucide="${a.icon}"></i></span>
+                <div class="activity-body">
+                  <div class="activity-title">${a.title}</div>
+                  <div class="activity-sub">${a.sub}</div>
+                </div>
+                <div class="activity-date">${fmtActividadFecha(a)}</div>
+              </div>
+            `).join('')}
+          </div>
+        ` : `<div class="empty-state" style="padding:16px 0"><p>Todavía no hay actividad registrada</p></div>`}
       </div>
-      <div class="progress-wrap mb-8">
-        <div class="progress-bar ${stockColor(pct)}" style="width:${pct}%"></div>
+
+      <!-- ACCIONES RÁPIDAS -->
+      <div class="card anim-in" style="animation-delay:.24s">
+        <div class="card-header">
+          <div class="card-title"><span class="card-icon"><i data-lucide="zap"></i></span> Acciones rápidas</div>
+        </div>
+        <div class="quick-actions-list">
+          <button class="quick-action-item" onclick="openMovimientoForm('income')">
+            <span class="quick-action-icon"><i data-lucide="shopping-cart"></i></span>
+            <span>Nueva venta</span>
+            <i data-lucide="chevron-right" class="quick-action-chevron"></i>
+          </button>
+          <button class="quick-action-item" onclick="_bloqueImportadoIdxActual=null;openPedidoForm(null)">
+            <span class="quick-action-icon"><i data-lucide="shopping-bag"></i></span>
+            <span>Nuevo pedido</span>
+            <i data-lucide="chevron-right" class="quick-action-chevron"></i>
+          </button>
+          <button class="quick-action-item" onclick="openMovimientoForm('expense')">
+            <span class="quick-action-icon"><i data-lucide="package-plus"></i></span>
+            <span>Registrar compra</span>
+            <i data-lucide="chevron-right" class="quick-action-chevron"></i>
+          </button>
+          <button class="quick-action-item" onclick="openNotaForm(null)">
+            <span class="quick-action-icon"><i data-lucide="notebook-pen"></i></span>
+            <span>Nueva nota</span>
+            <i data-lucide="chevron-right" class="quick-action-chevron"></i>
+          </button>
+        </div>
       </div>
-      <div class="text-sm text-muted mb-12">
-        ${pct >= 60 ? '✅ Stock en buen nivel' : pct >= 30 ? '⚠️ Stock bajo — revisar' : '🔴 Stock crítico — reponer urgente'}
-      </div>
-      <button class="btn btn-secondary btn-sm" onclick="navigateCostos('ingredientes')">Ver stock completo</button>
     </div>
 
-    <!-- SALDO -->
-    <div class="card anim-in" style="animation-delay:.12s">
-      <div class="card-header">
-        <div class="card-title"><span class="card-icon">💰</span> Saldo</div>
-      </div>
-      <div class="dash-saldo-big">${fmt(saldo)}</div>
-      <div class="dash-change ${cambioClass} mb-12">Hoy: ${cambioStr}</div>
-      <button class="btn btn-secondary btn-sm" onclick="navigate('finanzas')">Ver movimientos</button>
-    </div>
-
-    <!-- NOTA -->
-    <div class="card anim-in" style="animation-delay:.18s">
-      <div class="card-header">
-        <div class="card-title"><span class="card-icon">📝</span> Última nota</div>
-      </div>
-      ${nota ? `
-        <div class="nota-date">${fmtDate(nota.fecha)}</div>
-        <div class="nota-text" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(nota.texto)}</div>
-        <div style="margin-top:10px"><button class="btn btn-secondary btn-sm" onclick="navigate('notas')">Ver todas</button></div>
-      ` : `<div class="empty-state" style="padding:16px 0"><p>Sin notas aún</p></div>`}
-    </div>
-
-    <!-- POR COBRAR -->
-    <div class="card anim-in" style="animation-delay:.24s">
-      <div class="card-header">
-        <div class="card-title"><span class="card-icon">🧾</span> Por cobrar</div>
-      </div>
-      <div class="dash-saldo-big" style="color:${totalPorCobrar()>0?'var(--red)':'var(--text)'}">${fmt(totalPorCobrar())}</div>
-      <div class="text-sm text-muted mb-12">
-        ${totalPorCobrar() > 0 ? `📌 ${state.pedidos.filter(p=>!estaPagadoCompleto(p)).length} pedido${state.pedidos.filter(p=>!estaPagadoCompleto(p)).length !== 1 ? 's' : ''} sin cobrar` : '✅ Todo cobrado'}
-      </div>
-      <button class="btn btn-secondary btn-sm" onclick="navigate('clientes')">Ver clientes</button>
-    </div>
-
-    <!-- BACKUP -->
-    <div class="card anim-in" style="animation-delay:.30s">
-      <div class="card-header">
-        <div class="card-title"><span class="card-icon">🗂️</span> Backup de datos</div>
-      </div>
-      <div class="text-sm text-muted mb-12">Descargá una copia de seguridad o restaurá una anterior.</div>
-      <div class="flex gap-8" style="flex-wrap:wrap">
-        <button class="btn btn-secondary btn-sm" onclick="exportarDatos()">⬇️ Exportar datos</button>
-        <button class="btn btn-ghost btn-sm" onclick="importarDatos()">⬆️ Importar datos</button>
+    <!-- TIP DEL DÍA -->
+    <div class="tip-banner anim-in" style="animation-delay:.30s">
+      <span class="tip-icon"><i data-lucide="lightbulb"></i></span>
+      <div>
+        <div class="tip-title">Tip del día</div>
+        <div class="tip-text">${tipDelDia}</div>
       </div>
     </div>
-    </div><!-- /dash-grid -->
   `;
+  if (window.lucide) lucide.createIcons();
 }
 
 /* -------- PEDIDOS -------- */
@@ -7760,14 +7934,14 @@ function confirmEliminarMovimiento(id) {
   });
 }
 
-function openMovimientoForm() {
+function openMovimientoForm(tipoDefault) {
   openModal(`
     <div class="modal-title">Nuevo movimiento</div>
     <div class="form-group">
       <label class="form-label">Tipo *</label>
       <select class="form-input" id="f-tipo" onchange="onTipoMovChange()">
-        <option value="income">⬆️ Ingreso</option>
-        <option value="expense">⬇️ Egreso</option>
+        <option value="income" ${tipoDefault === 'expense' ? '' : 'selected'}>⬆️ Ingreso</option>
+        <option value="expense" ${tipoDefault === 'expense' ? 'selected' : ''}>⬇️ Egreso</option>
       </select>
     </div>
     <div class="form-group">
@@ -8509,6 +8683,7 @@ function testNotifSW() {
 window.testNotif = testNotifSW;
 
 updateHeaderDate();
+if (window.lucide) lucide.createIcons();
 registrarSW().then(() => {
   // Esperamos a tener sesión anónima ANTES de leer/escribir Firestore,
   // porque con las reglas nuevas (request.auth != null) cualquier

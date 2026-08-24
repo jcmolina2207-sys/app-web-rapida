@@ -1958,6 +1958,14 @@ function totalIngresos() {
 function totalEgresos() {
   return state.movimientos.filter(m => m.tipo === 'expense').reduce((s, m) => s + m.monto, 0);
 }
+// Total de un tipo de movimiento ('income'/'expense') filtrado por método de
+// pago ('efectivo'/'transferencia'). Los movimientos viejos sin metodoPago
+// cargado se cuentan como "efectivo" (era el único método antes de esto).
+function totalPorMetodo(tipo, metodo) {
+  return state.movimientos
+    .filter(m => m.tipo === tipo && (m.metodoPago || 'efectivo') === metodo)
+    .reduce((s, m) => s + m.monto, 0);
+}
 function cambioHoy() {
   const hoy = todayStr();
   return state.movimientos.filter(m => m.fecha === hoy)
@@ -2150,17 +2158,38 @@ async function restaurarBackupEnFirestore() {
 /* ============================================================
    MODAL (BOTTOM SHEET)
 ============================================================ */
+// Bandera para distinguir cuando estamos navegando/abriendo-cerrando modal
+// como reacción a un popstate (botón atrás) — en ese caso no hay que volver
+// a empujar una entrada nueva al historial, porque ya se está "consumiendo" una.
+let _fromPopstate = false;
+// true mientras hay un modal abierto que empujó una entrada al historial.
+let _modalHistoryPushed = false;
+
 function openModal(content) {
   document.getElementById('modal-content').innerHTML = content;
   document.getElementById('modal').classList.add('open');
+  // Empujamos una entrada al historial para que el botón atrás (navegador o
+  // físico del celular) cierre el modal en vez de salir de la app.
+  if (!_fromPopstate && !_modalHistoryPushed) {
+    history.pushState({ modal: true, screen: activeScreen }, '', location.hash);
+    _modalHistoryPushed = true;
+  }
+  _fromPopstate = false;
   // focus first input
   setTimeout(() => {
     const inp = document.querySelector('#modal-content input, #modal-content select, #modal-content textarea');
     if (inp) inp.focus();
   }, 350);
 }
-function closeModal() {
+function closeModal(fromPopstate) {
   document.getElementById('modal').classList.remove('open');
+  if (_modalHistoryPushed) {
+    _modalHistoryPushed = false;
+    // Si el cierre lo pidió el usuario (botón Cancelar/X, tocar el fondo),
+    // consumimos la entrada que habíamos empujado para que el historial
+    // quede consistente y el próximo atrás no vuelva a abrir el modal.
+    if (!fromPopstate) history.back();
+  }
 }
 document.getElementById('modal').addEventListener('click', function(e) {
   if (e.target === this) closeModal();
@@ -2185,14 +2214,40 @@ function navigate(screen) {
   document.querySelectorAll(`.nav-item[data-screen="${screen}"]`).forEach(n => n.classList.add('active'));
   const titleEl = document.getElementById('header-screen-title');
   if (titleEl) titleEl.textContent = screenTitles[screen] || screen;
+  const cambioDePantalla = activeScreen !== screen;
   activeScreen = screen;
   renderScreen(screen);
   if (window.lucide) lucide.createIcons();
   closeFab();
+  // Empujar al historial para que "atrás" vuelva a la pantalla anterior en
+  // vez de cerrar la app — salvo que este cambio de pantalla venga de un
+  // popstate (ya es, en sí mismo, la reacción al atrás).
+  if (!_fromPopstate && cambioDePantalla) {
+    history.pushState({ screen }, '', '#' + screen);
+  }
+  _fromPopstate = false;
 }
 
 document.querySelectorAll('.nav-item').forEach(btn => {
   btn.addEventListener('click', () => navigate(btn.dataset.screen));
+});
+
+// Dejar una entrada inicial en el historial con la pantalla de arranque.
+history.replaceState({ screen: activeScreen }, '', '#' + activeScreen);
+
+// Botón atrás (navegador en PC, o gesto/botón físico atrás en el celular):
+// si hay un modal abierto lo cerramos; si no, volvemos a la pantalla anterior
+// en vez de dejar que el navegador cierre la pestaña/app.
+window.addEventListener('popstate', (e) => {
+  const modalAbierto = document.getElementById('modal').classList.contains('open');
+  if (modalAbierto) {
+    _modalHistoryPushed = false;
+    closeModal(true);
+    return;
+  }
+  const destino = (e.state && e.state.screen) || 'inicio';
+  _fromPopstate = true;
+  navigate(destino);
 });
 
 /* ============================================================
@@ -2805,7 +2860,7 @@ function generarIngresoAutoSiEntregado(p) {
     id: ID_INGRESO_AUTO_BASE + p.id, tipo: 'income',
     descripcion: `${p.producto} - ${p.cliente}`,
     monto: p.precio, fecha: p.fechaEntrega, auto: true,
-    pedidoId: p.id
+    pedidoId: p.id, metodoPago: p.metodoPago || 'efectivo'
   };
   state.movimientos.unshift(nuevoMov);
   persistItem('movimientos', nuevoMov);
@@ -2864,6 +2919,13 @@ function openRegistrarPago(id) {
       <label class="form-label">Monto a registrar ($)</label>
       <input class="form-input" id="f-monto-pago" type="number" min="0.01" step="0.01" value="${saldo}">
     </div>
+    <div class="form-group">
+      <label class="form-label">Método de pago</label>
+      <select class="form-input" id="f-metodo-pago-registrar">
+        <option value="efectivo" ${(p.metodoPago||'efectivo')==='efectivo' ? 'selected' : ''}>💵 Efectivo</option>
+        <option value="transferencia" ${p.metodoPago==='transferencia' ? 'selected' : ''}>🏦 Transferencia</option>
+      </select>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost w-100" onclick="openPedidoDetalle(${p.id})">Cancelar</button>
       <button class="btn btn-primary w-100" onclick="registrarPago(${p.id})">💰 Registrar</button>
@@ -2882,6 +2944,8 @@ function registrarPago(id) {
   const monto = Number(input?.value);
   if (!monto || monto <= 0) { showToast('⚠️ Ingresá un monto válido'); return; }
   p.montoPagado = montoPagadoDe(p) + monto;
+  const metodoSel = document.getElementById('f-metodo-pago-registrar');
+  if (metodoSel) p.metodoPago = metodoSel.value;
   delete p.pagado; // el booleano viejo queda obsoleto frente a montoPagado
   persistItem('pedidos', p);
   saveState();
@@ -3709,6 +3773,14 @@ function openPedidoForm(id, datosImportados) {
         Pedido pagado por completo
       </label>
       <div style="font-size:11px;color:var(--text3);margin-top:4px">Dejalo en 0 si todavía no pagó nada. Para sumar un pago más adelante, usá "Registrar pago" en el detalle del pedido.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Método de pago</label>
+      <select class="form-input" id="f-metodo-pago">
+        <option value="efectivo" ${(!p || (p.metodoPago||'efectivo')==='efectivo') ? 'selected' : ''}>💵 Efectivo</option>
+        <option value="transferencia" ${p && p.metodoPago==='transferencia' ? 'selected' : ''}>🏦 Transferencia</option>
+      </select>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Se usa para el ingreso que se registra en Finanzas cuando el pedido queda Entregado.</div>
     </div>
     <div class="form-group">
       <label class="form-label">Notas</label>
@@ -4865,6 +4937,7 @@ function savePedidoConfirmado(id) {
     hora: document.getElementById('f-hora').value || '12:00',
     estado: document.getElementById('f-estado').value,
     montoPagado: Math.max(0, Number(document.getElementById('f-monto-pagado').value) || 0),
+    metodoPago: document.getElementById('f-metodo-pago')?.value || 'efectivo',
     notas: document.getElementById('f-notas').value.trim(),
   };
 
@@ -4910,6 +4983,15 @@ function savePedidoConfirmado(id) {
 
       state.pedidos[idx] = { ...pedidoAnterior, ...data, stockDescontado, stockDetalle };
       const ingresoAuto = generarIngresoAutoSiEntregado(state.pedidos[idx]);
+      // Si el pedido ya estaba Entregado (el ingreso auto ya existía), igual
+      // sincronizamos el método de pago por si lo cambiaron en la edición.
+      if (!ingresoAuto) {
+        const movExistente = state.movimientos.find(m => m.auto && m.pedidoId === state.pedidos[idx].id);
+        if (movExistente && movExistente.metodoPago !== data.metodoPago) {
+          movExistente.metodoPago = data.metodoPago;
+          persistItem('movimientos', movExistente);
+        }
+      }
       persistItem('pedidos', state.pedidos[idx]);
       saveState(); closeModal();
       if (ingresoAuto) {
@@ -6778,6 +6860,22 @@ function renderFinanzas() {
       </div>
     </div>
 
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:16px;box-shadow:var(--shadow)">
+      <div style="font-weight:700;font-size:13px;color:var(--text);margin-bottom:8px">Por método de pago</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:2px">💵 Efectivo</div>
+          <div style="font-size:13px;color:var(--green);font-weight:700">+${fmt(totalPorMetodo('income','efectivo'))}</div>
+          <div style="font-size:12px;color:var(--red);font-weight:600">-${fmt(totalPorMetodo('expense','efectivo'))}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:2px">🏦 Transferencia</div>
+          <div style="font-size:13px;color:var(--green);font-weight:700">+${fmt(totalPorMetodo('income','transferencia'))}</div>
+          <div style="font-size:12px;color:var(--red);font-weight:600">-${fmt(totalPorMetodo('expense','transferencia'))}</div>
+        </div>
+      </div>
+    </div>
+
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px;flex-wrap:wrap">
       <div class="section-title" style="font-size:16px;margin-bottom:0">Movimientos</div>
       <div style="display:flex;gap:6px">
@@ -6881,6 +6979,39 @@ function renderFinanzasCalendario(movs) {
   `;
 }
 
+// Abre un modal con todos los pedidos que incluyen un producto puntual —
+// se usa al tocar un producto en los rankings de "Top productos" (Finanzas > Reportes).
+function verPedidosDeProducto(nombreProducto) {
+  const encontrados = state.pedidos.filter(p =>
+    (p.items || []).some(it => (it.producto || '').trim() === nombreProducto)
+  ).sort((a, b) => (b.fechaEntrega || '').localeCompare(a.fechaEntrega || ''));
+
+  const filas = encontrados.map(p => {
+    const item = (p.items || []).find(it => (it.producto || '').trim() === nombreProducto);
+    return `
+      <div class="finance-item anim-in" style="cursor:pointer" onclick="closeModal();setTimeout(()=>openPedidoDetalle(${p.id}),300)">
+        <div class="finance-dot income">📦</div>
+        <div class="finance-info">
+          <div class="finance-desc">${esc(p.cliente)} · ${item ? item.cantidad : ''}x ${esc(nombreProducto)}</div>
+          <div class="finance-date">${fmtDate(p.fechaEntrega)} · <span class="badge ${estadoBadge(p.estado)}">${estadoLabel(p.estado)}</span></div>
+        </div>
+        <div class="finance-amount income">${fmt(item ? item.subtotal : 0)}</div>
+      </div>`;
+  }).join('');
+
+  openModal(`
+    <div class="modal-title">📦 Pedidos con "${esc(nombreProducto)}"</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:12px">${encontrados.length} pedido${encontrados.length !== 1 ? 's' : ''} encontrado${encontrados.length !== 1 ? 's' : ''}</div>
+    ${encontrados.length === 0
+      ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">No se encontraron pedidos con este producto</p></div>`
+      : filas
+    }
+    <div class="modal-actions">
+      <button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button>
+    </div>
+  `);
+}
+
 /* -------- REPORTES: render -------- */
 function renderReportes() {
   const semanas = calcularIngresosEgresosPorSemana(8);
@@ -6889,7 +7020,8 @@ function renderReportes() {
   const topGanancia = calcularTopProductosPorGanancia(8);
 
   const rankRow = (label, valueLabel, pct, colorVar) => `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <div onclick="verPedidosDeProducto(decodeURIComponent('${encodeURIComponent(label)}'))"
+      style="display:flex;align-items:center;gap:10px;margin-bottom:10px;cursor:pointer">
       <div style="flex:1;min-width:0">
         <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;margin-bottom:4px">
           <span style="font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${label}</span>
@@ -6899,6 +7031,7 @@ function renderReportes() {
           <div style="width:${pct}%;height:100%;background:${colorVar};border-radius:6px"></div>
         </div>
       </div>
+      <span style="color:var(--text3);font-size:16px">›</span>
     </div>`;
 
   // Fila del ranking por ganancia: producto + cantidad vendida a la izquierda,
@@ -6908,7 +7041,8 @@ function renderReportes() {
       ? `<span style="font-weight:700;color:var(--text)">${fmt(t.ingresos)}</span> <span style="color:var(--text3);font-size:11px">(sin receta cargada)</span>`
       : `<span style="font-weight:700;color:var(--text)">${fmt(t.ingresos)}</span> <span style="font-weight:600;color:var(--green);font-size:11.5px">(${t.gananciaPesos>=0?'+':''}${fmt(t.gananciaPesos)})</span>`;
     return `
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <div onclick="verPedidosDeProducto(decodeURIComponent('${encodeURIComponent(t.producto)}'))"
+        style="display:flex;align-items:center;gap:10px;margin-bottom:10px;cursor:pointer">
         <div style="flex:1;min-width:0">
           <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;margin-bottom:4px;align-items:baseline">
             <span style="font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.producto}</span>
@@ -6921,6 +7055,7 @@ function renderReportes() {
             <span style="font-size:10.5px;color:var(--text3);white-space:nowrap">${t.cantidad} un.</span>
           </div>
         </div>
+        <span style="color:var(--text3);font-size:16px">›</span>
       </div>`;
   };
 
@@ -6961,6 +7096,41 @@ function renderReportes() {
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-bottom:16px;box-shadow:var(--shadow)">
       <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:10px">Ingresos vs egresos · últimas 8 semanas</div>
       ${renderBarChartFinanzas(semanas)}
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-bottom:16px;box-shadow:var(--shadow)">
+      <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:2px">💳 Por método de pago</div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:12px">Sobre el total histórico de movimientos</div>
+      ${(() => {
+        const ingEf = totalPorMetodo('income', 'efectivo');
+        const ingTr = totalPorMetodo('income', 'transferencia');
+        const egEf = totalPorMetodo('expense', 'efectivo');
+        const egTr = totalPorMetodo('expense', 'transferencia');
+        const totIng = ingEf + ingTr;
+        const totEg = egEf + egTr;
+        const pct = (v, t) => t > 0 ? Math.round((v / t) * 100) : 0;
+        const barra = (label, val, pctVal, colorVar) => `
+          <div style="margin-bottom:10px">
+            <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;margin-bottom:4px">
+              <span style="color:var(--text2)">${label}</span>
+              <span style="font-weight:700;color:${colorVar}">${fmt(val)} <span style="color:var(--text3);font-weight:400">(${pctVal}%)</span></span>
+            </div>
+            <div style="background:var(--surface2);border-radius:6px;height:7px;overflow:hidden">
+              <div style="width:${Math.max(pctVal,2)}%;height:100%;background:${colorVar};border-radius:6px"></div>
+            </div>
+          </div>`;
+        if (totIng === 0 && totEg === 0) {
+          return `<div class="empty-state" style="padding:8px 0"><p style="font-size:12px">Todavía no hay movimientos cargados</p></div>`;
+        }
+        return `
+          <div style="font-size:11.5px;font-weight:700;color:var(--text3);margin-bottom:6px">Ingresos</div>
+          ${barra('💵 Efectivo', ingEf, pct(ingEf, totIng), 'var(--green)')}
+          ${barra('🏦 Transferencia', ingTr, pct(ingTr, totIng), 'var(--green)')}
+          <div style="font-size:11.5px;font-weight:700;color:var(--text3);margin:10px 0 6px">Egresos</div>
+          ${barra('💵 Efectivo', egEf, pct(egEf, totEg), 'var(--red)')}
+          ${barra('🏦 Transferencia', egTr, pct(egTr, totEg), 'var(--red)')}
+        `;
+      })()}
     </div>
 
     <div style="display:grid;grid-template-columns:1fr;gap:12px">
@@ -7062,6 +7232,18 @@ function calcularCierreSemana(sel) {
   const egresos = movs.filter(m => m.tipo === 'expense').reduce((s, m) => s + m.monto, 0);
   const neto = ingresos - egresos;
 
+  // Desglose por método de pago (sólo dentro del rango de la semana elegida).
+  // Los movimientos viejos sin metodoPago cargado se cuentan como "efectivo".
+  const porMetodo = (tipo, metodo) => movs
+    .filter(m => m.tipo === tipo && (m.metodoPago || 'efectivo') === metodo)
+    .reduce((s, m) => s + m.monto, 0);
+  const metodoPago = {
+    ingresosEfectivo: porMetodo('income', 'efectivo'),
+    ingresosTransferencia: porMetodo('income', 'transferencia'),
+    egresosEfectivo: porMetodo('expense', 'efectivo'),
+    egresosTransferencia: porMetodo('expense', 'transferencia'),
+  };
+
   // Pedidos entregados en el rango (por fecha de entrega, no de creación).
   // Sólo lectura de state.pedidos: no toca marcarEntregado ni la lógica de stock.
   const pedidosEntregados = state.pedidos.filter(p =>
@@ -7070,13 +7252,13 @@ function calcularCierreSemana(sel) {
 
   const { materiaPrima, ahorro, sueldo, colchon, r } = calcularRepartoPesos(neto);
 
-  return { inicio, fin, ingresos, egresos, neto, pedidosEntregados, r, reparto: { materiaPrima, ahorro, sueldo, colchon } };
+  return { inicio, fin, ingresos, egresos, neto, pedidosEntregados, metodoPago, r, reparto: { materiaPrima, ahorro, sueldo, colchon } };
 }
 
 function textoCierreSemana(sel) {
   const d = calcularCierreSemana(sel);
   const rangoTxt = d.inicio === d.fin ? fmtDate(d.inicio) : `${fmtDate(d.inicio)} al ${fmtDate(d.fin)}`;
-  const { reparto, r } = d;
+  const { reparto, r, metodoPago } = d;
 
   return `💰 *Cierre semana* — ${rangoTxt}
 
@@ -7084,6 +7266,9 @@ Ingresos: ${fmt(d.ingresos)}
 Egresos: ${fmt(d.egresos)}
 Neto: ${fmt(d.neto)}
 Pedidos entregados: ${d.pedidosEntregados}
+
+💵 Efectivo: ${fmt(metodoPago.ingresosEfectivo)} ingresos / ${fmt(metodoPago.egresosEfectivo)} egresos
+🏦 Transferencia: ${fmt(metodoPago.ingresosTransferencia)} ingresos / ${fmt(metodoPago.egresosTransferencia)} egresos
 
 📊 Reparto sugerido:
 🧂 Materia prima: ${fmt(reparto.materiaPrima)} (${r.materiaPrima}%)
@@ -7121,6 +7306,22 @@ function renderCierreSemanaModal() {
     <div class="detail-row"><span class="label">Pedidos entregados</span><span class="value">${d.pedidosEntregados}</span></div>
 
     <div class="divider"></div>
+
+    <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:14px">
+      <div style="font-weight:700;font-size:12.5px;color:var(--text);margin-bottom:8px">Por método de pago</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:2px">💵 Efectivo</div>
+          <div style="font-size:12.5px;color:var(--green);font-weight:700">+${fmt(d.metodoPago.ingresosEfectivo)}</div>
+          <div style="font-size:11.5px;color:var(--red);font-weight:600">-${fmt(d.metodoPago.egresosEfectivo)}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:2px">🏦 Transferencia</div>
+          <div style="font-size:12.5px;color:var(--green);font-weight:700">+${fmt(d.metodoPago.ingresosTransferencia)}</div>
+          <div style="font-size:11.5px;color:var(--red);font-weight:600">-${fmt(d.metodoPago.egresosTransferencia)}</div>
+        </div>
+      </div>
+    </div>
 
     <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:10px;margin-bottom:14px;white-space:pre-wrap;font-size:12px;line-height:1.5;color:var(--text2);font-family:inherit">${esc(texto)}</div>
 
@@ -7841,12 +8042,14 @@ function gananciaResumenDiaTxt(resumen) {
 
 function finanzaItem(m) {
   const gananciaTxt = gananciaTxtMovimiento(m);
+  const metodo = m.metodoPago || 'efectivo';
+  const metodoTxt = metodo === 'transferencia' ? '🏦 Transferencia' : '💵 Efectivo';
   return `
     <div class="finance-item anim-in" style="cursor:pointer" onclick="openEditMovimiento(${m.id})">
       <div class="finance-dot ${m.tipo}">${m.tipo==='income'?'⬆️':'⬇️'}</div>
       <div class="finance-info">
         <div class="finance-desc">${esc(m.descripcion)}${m.auto?' 🔄':''}</div>
-        <div class="finance-date">${fmtDate(m.fecha)}</div>
+        <div class="finance-date">${fmtDate(m.fecha)} · ${metodoTxt}</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
         <div class="finance-amount ${m.tipo}">${m.tipo==='income'?'+':'-'}${fmt(m.monto)}${gananciaTxt}</div>
@@ -7880,6 +8083,13 @@ function openEditMovimiento(id) {
       <label class="form-label">Fecha</label>
       <input class="form-input" id="f-edit-fecha" type="date" value="${m.fecha}">
     </div>
+    <div class="form-group">
+      <label class="form-label">Método de pago</label>
+      <select class="form-input" id="f-edit-metodo">
+        <option value="efectivo" ${(m.metodoPago||'efectivo')==='efectivo' ? 'selected' : ''}>💵 Efectivo</option>
+        <option value="transferencia" ${m.metodoPago==='transferencia' ? 'selected' : ''}>🏦 Transferencia</option>
+      </select>
+    </div>
     ${m.auto ? `<div style="font-size:11px;color:var(--text3);margin-bottom:14px;padding:8px 12px;background:var(--surface2);border-radius:var(--radius-sm);border:1px solid var(--border)">🔄 Este movimiento fue generado automáticamente. Podés editarlo igual.</div>` : ''}
     <div class="modal-actions" style="flex-direction:column;gap:8px">
       <div style="display:flex;gap:8px;width:100%">
@@ -7904,6 +8114,7 @@ function saveEditMovimiento(id) {
     descripcion: desc,
     monto,
     fecha: document.getElementById('f-edit-fecha').value || todayStr(),
+    metodoPago: document.getElementById('f-edit-metodo')?.value || 'efectivo',
   };
   persistItem('movimientos', state.movimientos[idx]);
   saveState(); closeModal();
@@ -7969,6 +8180,13 @@ function openMovimientoForm(tipoDefault) {
     <div class="form-group">
       <label class="form-label">Fecha</label>
       <input class="form-input" id="f-fecha-mov" type="date" value="${todayStr()}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Método de pago</label>
+      <select class="form-input" id="f-metodo-mov">
+        <option value="efectivo" selected>💵 Efectivo</option>
+        <option value="transferencia">🏦 Transferencia</option>
+      </select>
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
@@ -8068,6 +8286,7 @@ function saveMovimiento() {
     descripcion: desc,
     monto,
     fecha: document.getElementById('f-fecha-mov').value || todayStr(),
+    metodoPago: document.getElementById('f-metodo-mov')?.value || 'efectivo',
     auto: false,
   };
   state.movimientos.unshift(nuevoMov);

@@ -1,32 +1,29 @@
-name: Notificaciones de pedidos
+name: Notificaciones Toque Artesano
 
 on:
   schedule:
-    # Cada 10 minutos. OJO con el límite gratis de minutos si el repo
-    # es PRIVADO (ver nota de "minutos gratis" en SETUP.md). Si tenés
-    # el repo privado y querés ir 100% seguro dentro del free tier,
-    # cambiá esto a "*/30 * * * *".
+    # Corre cada 10 minutos, todo el día, todos los días.
+    # Argentina no tiene horario de verano, así que el offset UTC-3
+    # es fijo todo el año — no hace falta ajustar esto nunca.
     - cron: '*/10 * * * *'
-  workflow_dispatch: {} # permite ejecutarlo a mano desde la pestaña "Actions" para probar
+  workflow_dispatch: {}   # permite disparar manualmente desde la pestaña Actions, para probar
 
 jobs:
   enviar-notificaciones:
     runs-on: ubuntu-latest
     steps:
-      - name: Descargar repo
+      - name: Checkout del repo
         uses: actions/checkout@v4
 
-      - name: Configurar Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Instalar dependencias
-        working-directory: scripts
-        run: npm install
+        run: npm install firebase-admin
 
-      - name: Ejecutar chequeo de notificaciones
-        working-directory: scripts
-        run: node send-notifications.js
+      - name: Ejecutar script de notificaciones
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: node scripts/send-notifications.js

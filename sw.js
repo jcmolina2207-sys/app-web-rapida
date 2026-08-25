@@ -41,8 +41,8 @@ self.addEventListener('push', event => {
     if (title) {
       event.waitUntil(self.registration.showNotification(title, {
         body: body || '',
-        icon: '/icon.png',
-        badge: '/icon.png',
+        icon: './icon.png',
+        badge: './icon.png',
         vibrate: [200, 100, 200],
       }));
     }
@@ -78,8 +78,8 @@ self.addEventListener('message', event => {
   if (type === 'TEST_NOTIFICATION') {
     self.registration.showNotification('🍰 Prueba — Toque Artesano', {
       body: 'Las notificaciones funcionan correctamente!',
-      icon: '/icon.png',
-      badge: '/icon.png',
+      icon: './icon.png',
+      badge: './icon.png',
       tag: 'test-' + Date.now(),
       vibrate: [200, 100, 200],
     });

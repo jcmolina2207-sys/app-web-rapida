@@ -1761,11 +1761,15 @@ function seedDatosSofia() {
   let recetaCambiada = null;
 
   state.gastosFijos = state.gastosFijos || [];
-  if (state.gastosFijos.length === 0) {
+  // Se siembra UNA sola vez en la vida de la app (flag en config), no cuando
+  // el array está vacío: si no, cada vez que Sofía borra todos los gastos
+  // fijos, al volver a entrar el array queda en 0 y esto los revivía solo.
+  if (!state.config.seedGastosFijosAplicado) {
     const g1 = { id: nextId(), nombre: 'Gas', monto: 28000, cadaXDias: 35, tipo: 'gas' };
     const g2 = { id: nextId(), nombre: 'Papelería', monto: 20000, cadaXDias: 20, tipo: 'papeleria' };
     state.gastosFijos.push(g1, g2);
     gastosNuevos.push(g1, g2);
+    state.config.seedGastosFijosAplicado = true;
     cambio = true;
   }
 
@@ -2069,7 +2073,7 @@ function exportarDatos() {
   localStorage.setItem('toque_ultimo_backup', todayStr());
 
   // Ocultar el cartel de backup: ya se hizo, no debería seguir visible
-  sessionStorage.setItem('toque_backup_banner_oculto', '1');
+  localStorage.setItem('toque_backup_banner_oculto_fecha', todayStr());
   const banner = document.getElementById('backup-banner');
   if (banner) banner.remove();
 
@@ -2977,6 +2981,14 @@ function confirmEliminarPedido(id) {
       revertirMateriaPrimaByPedido(pedido.stockDetalle);
       persistIngredientesPorIds(pedido.stockDetalle.map(d => d.ingId));
     }
+    // Si el pedido estaba Entregado, tenía un ingreso automático en Finanzas
+    // ligado por pedidoId (ver generarIngresoAutoSiEntregado). Si no lo
+    // borramos acá, el pedido desaparece pero el ingreso queda huérfano en
+    // Finanzas para siempre.
+    const movAuto = state.movimientos.find(m => m.auto && m.pedidoId === id);
+    if (movAuto) {
+      state.movimientos = state.movimientos.filter(m => m.id !== movAuto.id);
+    }
     state.pedidos = state.pedidos.filter(p => p.id !== id);
     closeModal();
     renderScreen(activeScreen);
@@ -2984,11 +2996,12 @@ function confirmEliminarPedido(id) {
     // "resucite" aunque el borrado remoto tarde o falle; el toast solo
     // informa si además se confirmó contra Firestore.
     const ok = await removeItem('pedidos', id);
+    const okMov = movAuto ? await removeItem('movimientos', movAuto.id) : true;
     saveState();
     showToast(
       huboDescuento
-        ? (ok ? 'Pedido eliminado · stock repuesto' : 'Pedido eliminado localmente · se sincronizará · stock repuesto')
-        : (ok ? 'Pedido eliminado' : 'Pedido eliminado localmente · se sincronizará')
+        ? ((ok && okMov) ? 'Pedido eliminado · stock repuesto' : 'Pedido eliminado localmente · se sincronizará · stock repuesto')
+        : ((ok && okMov) ? 'Pedido eliminado' : 'Pedido eliminado localmente · se sincronizará')
     );
   });
 }
@@ -8816,7 +8829,10 @@ function renderBackupBanner() {
   const dias = diasSinBackup();
   const nunca = dias === null;
   if (!nunca && dias <= 20) return '';
-  if (sessionStorage.getItem('toque_backup_banner_oculto') === '1') return '';
+  // localStorage (no sessionStorage): "Ahora no" tiene que durar más que la
+  // pestaña/sesión del navegador, si no vuelve a aparecer cada vez que se
+  // cierra y se abre la app aunque sea el mismo día.
+  if (localStorage.getItem('toque_backup_banner_oculto_fecha') === todayStr()) return '';
   const texto = nunca ? 'Nunca hiciste un backup' : `Hace ${dias} días que no hacés un backup`;
   return `<div class="card" style="background:var(--yellow-light);border-color:var(--yellow);margin-bottom:12px" id="backup-banner">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
@@ -8835,7 +8851,7 @@ function renderBackupBanner() {
   </div>`;
 }
 function ocultarBackupBanner() {
-  sessionStorage.setItem('toque_backup_banner_oculto', '1');
+  localStorage.setItem('toque_backup_banner_oculto_fecha', todayStr());
   const el = document.getElementById('backup-banner');
   if (el) el.remove();
 }

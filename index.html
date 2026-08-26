@@ -567,6 +567,7 @@
   .act-icon-act-green { background: var(--green-light); color: var(--green); }
   .act-icon-act-orange { background: var(--yellow-light); color: var(--yellow); }
   .act-icon-act-yellow { background: var(--yellow-light); color: var(--yellow); }
+  .act-icon-act-blue { background: var(--blue-light); color: var(--blue); }
   .activity-body { flex: 1; min-width: 0; }
   .activity-title { font-size: 13.5px; font-weight: 600; color: var(--text); }
   .activity-sub {
@@ -2358,11 +2359,23 @@ function pedidosPendientesCount() {
 // alguna vez) y si no hay _ts, por fecha.
 function actividadReciente(limit = 6) {
   const items = [];
-  state.movimientos.forEach(m => {
-    if (m.auto && m.pedidoId) {
+  // Pedidos: se listan por sí mismos (nuevo pedido / entregado). El ingreso
+  // automático que se genera en Finanzas al entregar un pedido (m.auto &&
+  // m.pedidoId) representa el MISMO hecho que ya se muestra acá, así que
+  // se omite más abajo al recorrer movimientos — evita mostrar el mismo
+  // monto dos veces (una como pedido y otra como movimiento de caja).
+  state.pedidos.forEach(p => {
+    if (p.estado === 'done') {
       items.push({ icon: 'package-check', cls: 'act-green', title: 'Pedido entregado',
-        sub: `${esc(m.descripcion)} · ${fmt(m.monto)}`, fecha: m.fecha, ts: m._ts || null });
-    } else if (m.tipo === 'income') {
+        sub: `${esc(p.producto)} - ${esc(p.cliente)} · ${fmt(p.precio)}`, fecha: p.fechaEntrega, ts: p._ts || null });
+    } else {
+      items.push({ icon: 'shopping-bag', cls: 'act-blue', title: 'Nuevo pedido',
+        sub: `${esc(p.producto)} - ${esc(p.cliente)} · ${fmt(p.precio)}`, fecha: p.fechaEntrega, ts: p._ts || null });
+    }
+  });
+  state.movimientos.forEach(m => {
+    if (m.auto && m.pedidoId) return; // ya representado por el pedido de arriba
+    if (m.tipo === 'income') {
       items.push({ icon: 'shopping-cart', cls: 'act-green', title: 'Venta registrada',
         sub: `${esc(m.descripcion)} · ${fmt(m.monto)}`, fecha: m.fecha, ts: m._ts || null });
     } else {
@@ -2469,57 +2482,26 @@ function renderInicio() {
       </div>
     </div>
 
-    <div class="dash-lower-grid">
-      <!-- ACTIVIDAD RECIENTE -->
-      <div class="card anim-in" style="animation-delay:.18s">
-        <div class="card-header">
-          <div class="card-title"><span class="card-icon"><i data-lucide="history"></i></span> Actividad reciente</div>
-          <button class="btn btn-ghost btn-sm" onclick="navigate('finanzas')">Ver todo</button>
-        </div>
-        ${actividad.length ? `
-          <div class="activity-list">
-            ${actividad.map(a => `
-              <div class="activity-item">
-                <span class="activity-icon act-icon-${a.cls}"><i data-lucide="${a.icon}"></i></span>
-                <div class="activity-body">
-                  <div class="activity-title">${a.title}</div>
-                  <div class="activity-sub">${a.sub}</div>
-                </div>
-                <div class="activity-date">${fmtActividadFecha(a)}</div>
+    <!-- ACTIVIDAD RECIENTE -->
+    <div class="card anim-in" style="animation-delay:.18s">
+      <div class="card-header">
+        <div class="card-title"><span class="card-icon"><i data-lucide="history"></i></span> Actividad reciente</div>
+        <button class="btn btn-ghost btn-sm" onclick="navigate('finanzas')">Ver todo</button>
+      </div>
+      ${actividad.length ? `
+        <div class="activity-list">
+          ${actividad.map(a => `
+            <div class="activity-item">
+              <span class="activity-icon act-icon-${a.cls}"><i data-lucide="${a.icon}"></i></span>
+              <div class="activity-body">
+                <div class="activity-title">${a.title}</div>
+                <div class="activity-sub">${a.sub}</div>
               </div>
-            `).join('')}
-          </div>
-        ` : `<div class="empty-state" style="padding:16px 0"><p>Todavía no hay actividad registrada</p></div>`}
-      </div>
-
-      <!-- ACCIONES RÁPIDAS -->
-      <div class="card anim-in" style="animation-delay:.24s">
-        <div class="card-header">
-          <div class="card-title"><span class="card-icon"><i data-lucide="zap"></i></span> Acciones rápidas</div>
+              <div class="activity-date">${fmtActividadFecha(a)}</div>
+            </div>
+          `).join('')}
         </div>
-        <div class="quick-actions-list">
-          <button class="quick-action-item" onclick="openMovimientoForm('income')">
-            <span class="quick-action-icon"><i data-lucide="shopping-cart"></i></span>
-            <span>Nueva venta</span>
-            <i data-lucide="chevron-right" class="quick-action-chevron"></i>
-          </button>
-          <button class="quick-action-item" onclick="_bloqueImportadoIdxActual=null;openPedidoForm(null)">
-            <span class="quick-action-icon"><i data-lucide="shopping-bag"></i></span>
-            <span>Nuevo pedido</span>
-            <i data-lucide="chevron-right" class="quick-action-chevron"></i>
-          </button>
-          <button class="quick-action-item" onclick="openMovimientoForm('expense')">
-            <span class="quick-action-icon"><i data-lucide="package-plus"></i></span>
-            <span>Registrar compra</span>
-            <i data-lucide="chevron-right" class="quick-action-chevron"></i>
-          </button>
-          <button class="quick-action-item" onclick="openNotaForm(null)">
-            <span class="quick-action-icon"><i data-lucide="notebook-pen"></i></span>
-            <span>Nueva nota</span>
-            <i data-lucide="chevron-right" class="quick-action-chevron"></i>
-          </button>
-        </div>
-      </div>
+      ` : `<div class="empty-state" style="padding:16px 0"><p>Todavía no hay actividad registrada</p></div>`}
     </div>
 
     <!-- TIP DEL DÍA -->

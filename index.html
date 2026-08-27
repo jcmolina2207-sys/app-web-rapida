@@ -5231,6 +5231,96 @@ function confirmEliminarGastoFijo(id) {
   });
 }
 
+/* -------- CARTEL AUTOMÁTICO DE GASTOS FIJOS --------
+   Se muestra como mucho 1 vez por día por dispositivo (guardado en
+   localStorage, es intencional que NO sincronice entre dispositivos:
+   cada uno tiene su propio "ya lo vi hoy"). Por cada gasto pendiente
+   o vencido, el usuario elige una acción y esa fila se cierra:
+     - Pagar: registra el pago real (mismo efecto que "Pagado hoy").
+     - Posponer: no pasa nada más hoy; mañana, si sigue pendiente,
+       vuelve a aparecer en el cartel.
+     - Ignorar: no vuelve a aparecer para ESE vencimiento puntual
+       (se guarda la fecha de vencimiento ignorada); en cuanto el
+       gasto se pague y el vencimiento cambie, vuelve a poder avisar.
+------------------------------------------------------------ */
+const LS_GASTOFIJO_ULTIMO_AVISO = 'toque_gastofijo_ultimo_aviso';
+const LS_GASTOFIJO_IGNORADOS = 'toque_gastofijo_ignorados';
+let _cartelGastosFijosMostradoEstaSesion = false;
+
+function obtenerIgnoradosGastoFijo() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_GASTOFIJO_IGNORADOS) || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+function guardarIgnoradosGastoFijo(ignorados) {
+  localStorage.setItem(LS_GASTOFIJO_IGNORADOS, JSON.stringify(ignorados));
+}
+
+function chequearCartelGastosFijos() {
+  if (_cartelGastosFijosMostradoEstaSesion) return;
+  if (localStorage.getItem(LS_GASTOFIJO_ULTIMO_AVISO) === todayStr()) return;
+  const ignorados = obtenerIgnoradosGastoFijo();
+  const pendientes = gastosFijosPorVencerOVencidos()
+    .filter(g => ignorados[g.id] !== proximaFechaPagoGasto(g));
+  if (pendientes.length === 0) return;
+  _cartelGastosFijosMostradoEstaSesion = true;
+  localStorage.setItem(LS_GASTOFIJO_ULTIMO_AVISO, todayStr());
+  abrirCartelGastosFijos(pendientes);
+}
+
+function abrirCartelGastosFijos(pendientes) {
+  const fila = (g) => {
+    const estado = estadoPagoGastoFijo(g);
+    const colorVar = estado === 'red' ? 'var(--red)' : 'var(--yellow)';
+    const dias = diffDiasDesdeHoy(proximaFechaPagoGasto(g));
+    const vencLabel = dias < 0
+      ? `Venció hace ${Math.abs(dias)} día${Math.abs(dias) !== 1 ? 's' : ''}`
+      : dias === 0 ? 'Vence hoy' : `Vence en ${dias} día${dias !== 1 ? 's' : ''}`;
+    return `
+      <div class="ingredient-item anim-in" id="cartel-gasto-row-${g.id}" style="border:1.5px solid ${colorVar}">
+        <div class="ingredient-header">
+          <div class="ingredient-name">${esc(g.nombre)}</div>
+          <span style="font-size:13px;font-weight:700;color:var(--accent)">${fmt(g.monto)}</span>
+        </div>
+        <div style="font-size:12px;font-weight:600;color:${colorVar};margin-bottom:8px">${vencLabel}</div>
+        <div class="ingredient-actions">
+          <button class="btn btn-primary btn-sm" onclick="cartelGastoAccion(${g.id},'pagar')">💰 Pagar</button>
+          <button class="btn btn-ghost btn-sm" onclick="cartelGastoAccion(${g.id},'posponer')">⏰ Posponer</button>
+          <button class="btn btn-ghost btn-sm" onclick="cartelGastoAccion(${g.id},'ignorar')">🚫 Ignorar</button>
+        </div>
+      </div>`;
+  };
+  openModal(`
+    <div class="modal-title">💸 Gastos fijos por atender</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:12px">Elegí qué hacer con cada uno. "Posponer" te lo vuelve a mostrar mañana; "Ignorar" no te avisa de nuevo hasta que cambie el vencimiento.</div>
+    <div id="cartel-gastos-lista">${pendientes.map(fila).join('')}</div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="closeModal()">Cerrar</button>
+    </div>
+  `);
+}
+
+function cartelGastoAccion(id, accion) {
+  const g = state.gastosFijos.find(x => x.id === id);
+  if (!g) return;
+  if (accion === 'pagar') {
+    marcarGastoFijoPagado(id);
+  } else if (accion === 'ignorar') {
+    const ignorados = obtenerIgnoradosGastoFijo();
+    ignorados[id] = proximaFechaPagoGasto(g);
+    guardarIgnoradosGastoFijo(ignorados);
+    showToast(`🚫 No te vamos a avisar más de "${g.nombre}" hasta el próximo vencimiento`);
+  }
+  // 'posponer' no necesita guardar nada: el gate de una vez por día ya
+  // impide que vuelva a aparecer hoy, y mañana se reevalúa de cero.
+  const row = document.getElementById(`cartel-gasto-row-${id}`);
+  if (row) row.remove();
+  const lista = document.getElementById('cartel-gastos-lista');
+  if (lista && lista.children.length === 0) closeModal();
+}
+
 function openConfigCostosForm() {
   openModal(`
     <div class="modal-title">⚙️ Configuración de costos</div>
@@ -6588,9 +6678,15 @@ function calcularIngresosEgresosPorSemana(cantSemanas = 8) {
 }
 
 // Top productos por cantidad vendida (suma de p.items[].cantidad en todos los pedidos) — O(n)
+// Nota: sólo cuenta pedidos ENTREGADOS (estado 'done'), igual que
+// calcularTopProductosPorIngresos/calcularTopProductosPorGanancia y
+// "Unidades vendidas". Antes contaba TODOS los pedidos (incluidos
+// pendientes/en preparación), lo que daba un ranking distinto e
+// inconsistente con el resto de Reportes.
 function calcularTopProductosPorCantidad(top = 5) {
   const mapa = new Map();
   state.pedidos.forEach(p => {
+    if (p.estado !== 'done') return;
     (p.items || []).forEach(it => {
       const nombre = (it.producto || '').trim();
       if (!nombre) return;
@@ -6665,6 +6761,75 @@ function calcularTopProductosPorGanancia(top = 8) {
   return [...ventas.values()]
     .sort((a, b) => b.cantidad - a.cantidad)
     .slice(0, top);
+}
+
+// Compara el mes calendario actual vs el mes calendario anterior completo
+// (ingresos, egresos y neto), usando state.movimientos. Nueva métrica que
+// no existía: el gráfico de 8 semanas no deja ver de un vistazo "¿este mes
+// vamos mejor o peor que el pasado?".
+function calcularComparativoMesVsAnterior() {
+  const NOMBRES_MES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  const hoy = todayStr();
+  const [yActual, mActual] = hoy.split('-').map(Number);
+  const prefijoActual = `${yActual}-${String(mActual).padStart(2,'0')}`;
+  const dtAnterior = new Date(yActual, mActual - 2, 1); // mActual-1 es el mes actual (0-index), -1 más = mes anterior
+  const prefijoAnterior = `${dtAnterior.getFullYear()}-${String(dtAnterior.getMonth()+1).padStart(2,'0')}`;
+
+  const sumarMes = (prefijo) => {
+    let ingresos = 0, egresos = 0;
+    state.movimientos.forEach(mv => {
+      if (!mv.fecha || !mv.fecha.startsWith(prefijo)) return;
+      if (mv.tipo === 'income') ingresos += mv.monto; else egresos += mv.monto;
+    });
+    return { ingresos, egresos, neto: ingresos - egresos };
+  };
+
+  const pctCambio = (actual, prev) => {
+    if (prev === 0) return actual === 0 ? null : 100;
+    return Math.round(((actual - prev) / Math.abs(prev)) * 100);
+  };
+
+  const actual = sumarMes(prefijoActual);
+  const anterior = sumarMes(prefijoAnterior);
+
+  return {
+    labelActual: NOMBRES_MES[mActual - 1],
+    labelAnterior: NOMBRES_MES[dtAnterior.getMonth()],
+    actual, anterior,
+    pctIngresos: pctCambio(actual.ingresos, anterior.ingresos),
+    pctEgresos: pctCambio(actual.egresos, anterior.egresos),
+    pctNeto: pctCambio(actual.neto, anterior.neto),
+  };
+}
+
+function renderComparativoMensual() {
+  const c = calcularComparativoMesVsAnterior();
+  const hayDatos = c.actual.ingresos > 0 || c.actual.egresos > 0 || c.anterior.ingresos > 0 || c.anterior.egresos > 0;
+
+  const fila = (label, val, pct, colorVar) => {
+    const pctTxt = pct === null
+      ? `<span style="font-size:10.5px;color:var(--text3)">(sin datos del mes anterior)</span>`
+      : `<span style="font-size:11px;font-weight:700;color:${pct >= 0 ? 'var(--green)' : 'var(--red)'}">${pct >= 0 ? '▲' : '▼'} ${Math.abs(pct)}%</span>`;
+    return `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:12.5px;color:var(--text2)">${label}</span>
+        <span style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:${colorVar}">${fmt(val)} ${pctTxt}</span>
+      </div>`;
+  };
+
+  return `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-bottom:16px;box-shadow:var(--shadow)">
+      <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:2px">📅 ${c.labelActual} vs ${c.labelAnterior}</div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:10px">Mes calendario en curso vs el mes calendario anterior completo</div>
+      ${!hayDatos
+        ? `<div class="empty-state" style="padding:12px 0"><p style="font-size:12px">Todavía no hay movimientos en estos dos meses</p></div>`
+        : `
+          ${fila('Ingresos', c.actual.ingresos, c.pctIngresos, 'var(--green)')}
+          ${fila('Egresos', c.actual.egresos, c.pctEgresos, 'var(--red)')}
+          ${fila('Neto', c.actual.neto, c.pctNeto, c.actual.neto >= 0 ? 'var(--green)' : 'var(--red)')}
+        `
+      }
+    </div>`;
 }
 
 /* -------- REPORTES: unidades vendidas por producto / familia -------- */
@@ -6855,6 +7020,7 @@ function renderFinanzas() {
       </div>
     </div>
 
+    ${finanzasVista === 'reportes' ? '' : `
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:16px;box-shadow:var(--shadow)">
       <div style="font-weight:700;font-size:13px;color:var(--text);margin-bottom:8px">Por método de pago</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -6870,6 +7036,7 @@ function renderFinanzas() {
         </div>
       </div>
     </div>
+    `}
 
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px;flex-wrap:wrap">
       <div class="section-title" style="font-size:16px;margin-bottom:0">Movimientos</div>
@@ -7088,6 +7255,10 @@ function renderReportes() {
       <button class="btn btn-primary btn-sm" onclick="openCierreSemana()">📤 Cierre de la semana</button>
     </div>
 
+    <div style="font-size:11.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.03em;margin:4px 0 8px">📊 Análisis</div>
+
+    ${renderComparativoMensual()}
+
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-bottom:16px;box-shadow:var(--shadow)">
       <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:10px">Ingresos vs egresos · últimas 8 semanas</div>
       ${renderBarChartFinanzas(semanas)}
@@ -7130,9 +7301,10 @@ function renderReportes() {
 
     <div style="display:grid;grid-template-columns:1fr;gap:12px">
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;box-shadow:var(--shadow)">
-        <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:12px">🏆 Top 5 · más vendidos</div>
+        <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:2px">🏆 Top 5 · más vendidos</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:10px;margin-top:-6px">Sobre pedidos entregados</div>
         ${topCantidad.length === 0
-          ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">Todavía no hay pedidos con productos cargados</p></div>`
+          ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">Todavía no hay pedidos entregados</p></div>`
           : topCantidad.map(t => rankRow(t.producto, `${t.cantidad} un.`, Math.max(6, (t.cantidad / maxCant) * 100), 'var(--accent)')).join('')
         }
       </div>
@@ -7168,6 +7340,8 @@ function renderReportes() {
         `
       }
     </div>
+
+    <div style="font-size:11.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.03em;margin:16px 0 8px">🛠️ Herramientas</div>
 
     ${renderReporteSueldoSimulado()}
     ${renderReporteReparto()}
@@ -8912,6 +9086,7 @@ registrarSW().then(() => {
         registrarTokenFCM(); // refresca el token por si cambió
       }
       updateBellIcon();
+      chequearCartelGastosFijos();
     });
   });
 });

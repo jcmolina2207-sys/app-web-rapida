@@ -1078,7 +1078,6 @@
         <div id="costos-subtabs" style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap"></div>
         <div id="screen-ingredientes"></div>
         <div id="screen-recetas"></div>
-        <div id="screen-gastosfijos"></div>
       </div>
       <div class="screen" id="screen-finanzas"></div>
       <div class="screen" id="screen-notas"></div>
@@ -1385,11 +1384,11 @@ let state = {
   notas: [],
   recetas: [],
   catalogo: [],   // productos personalizados agregados por Sofi
-  gastosFijos: [], // { id, nombre, monto, cadaXDias, tipo }
   clientes: [],   // datos editables por cliente: { key, nombre, telefono, direccion, nota }
   config: {
-    horasProductivasMes: 256, // martes a domingo, 8-14 y 16-19:30, ~27 días/mes
     valorHora: 7200,          // convenio Ayudante Pastelero ($1.444.937 / 200hs), ajustable
+    costoGasPorMinuto: 13.33, // $/min de horno, manual (ver seedDatosSofia para el valor inicial)
+    costoFijoPorHora: 117.19, // $/hora productiva, manual (ver seedDatosSofia para el valor inicial)
     horarioSueldo: {          // horario detallado, sólo para el reporte de "sueldo simulado" (Finanzas > Reportes)
       diasPorSemana: 6,       // martes a domingo
       turnos: [{ inicio: '09:00', fin: '13:00' }, { inicio: '15:00', fin: '19:00' }],
@@ -1406,7 +1405,7 @@ let state = {
 let _nextIdFromDB = 1;
 
 // Colecciones que se sincronizan documento-por-documento (subcolecciones reales)
-const SYNCED_COLLECTIONS = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','gastosFijos','clientes'];
+const SYNCED_COLLECTIONS = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','clientes'];
 
 // Sync status UI
 function setSyncStatus(status) {
@@ -1731,8 +1730,32 @@ async function loadFromFirebase() {
     pruneTombstones();
     saveTombstones();
 
+    // IMPORTANTE: esto es un merge, no un reemplazo ciego.
+    // Antes se hacía `state.nextId = metaDoc.data().nextId`, lo cual podía
+    // PISAR HACIA ATRÁS el nextId local si el usuario ya había creado
+    // pedidos (avanzando state.nextId en memoria) mientras esta carga desde
+    // Firestore todavía estaba en vuelo (recordar: el timeout de 5s solo
+    // corta el `await`, esta promesa sigue corriendo en segundo plano y
+    // pisa state.nextId igual cuando por fin resuelve). Si nextId retrocedía,
+    // el próximo pedido nuevo reusaba un id ya asignado a un pedido recién
+    // creado y su persistItem() pisaba ese documento en Firestore (mismo
+    // docId = String(id)) → pedidos "desaparecidos".
     if (metaDoc.exists) {
-      state.nextId = metaDoc.data().nextId || 1;
+      state.nextId = Math.max(state.nextId || 1, metaDoc.data().nextId || 1);
+    }
+    // Segunda red de seguridad: además de respetar meta/nextId, nunca dejar
+    // que nextId quede por debajo del id numérico más alto que exista
+    // realmente en las colecciones ya mergeadas (por si meta/nextId quedó
+    // desactualizado por algún motivo).
+    let _maxIdReal = 0;
+    SYNCED_COLLECTIONS.forEach(c => {
+      (state[c] || []).forEach(item => {
+        if (typeof item.id === 'number' && item.id > _maxIdReal) _maxIdReal = item.id;
+      });
+    });
+    if (_maxIdReal >= state.nextId) {
+      state.nextId = _maxIdReal + 1;
+      saveNextId(state.nextId);
     }
     if (configDoc.exists) {
       state.config = { ...state.config, ...configDoc.data() };
@@ -1758,19 +1781,20 @@ async function loadFromFirebase() {
 // Siembra los datos de costos que pasó Sofía (una sola vez, no duplica)
 function seedDatosSofia() {
   let cambio = false;
-  const gastosNuevos = [];
   let recetaCambiada = null;
 
-  state.gastosFijos = state.gastosFijos || [];
-  // Se siembra UNA sola vez en la vida de la app (flag en config), no cuando
-  // el array está vacío: si no, cada vez que Sofía borra todos los gastos
-  // fijos, al volver a entrar el array queda en 0 y esto los revivía solo.
-  if (!state.config.seedGastosFijosAplicado) {
-    const g1 = { id: nextId(), nombre: 'Gas', monto: 28000, cadaXDias: 35, tipo: 'gas' };
-    const g2 = { id: nextId(), nombre: 'Papelería', monto: 20000, cadaXDias: 20, tipo: 'papeleria' };
-    state.gastosFijos.push(g1, g2);
-    gastosNuevos.push(g1, g2);
-    state.config.seedGastosFijosAplicado = true;
+  // costoGasPorMinuto / costoFijoPorHora: valores manuales que reemplazan al
+  // prorrateo automático que antes hacían los "gastos fijos" (Gas y Papelería,
+  // eliminados como entidad). Se siembran UNA sola vez con el equivalente a
+  // lo que esos gastos daban antes (Gas $28.000 c/35 días → $13,33/min;
+  // Papelería $20.000 c/20 días mensualizado y prorrateado en 256hs → $117,19/h),
+  // para no alterar los costos/márgenes ya calculados de las recetas existentes.
+  if (state.config.costoGasPorMinuto === undefined) {
+    state.config.costoGasPorMinuto = 13.33;
+    cambio = true;
+  }
+  if (state.config.costoFijoPorHora === undefined) {
+    state.config.costoFijoPorHora = 117.19;
     cambio = true;
   }
 
@@ -1800,7 +1824,6 @@ function seedDatosSofia() {
   }
 
   if (cambio) {
-    gastosNuevos.forEach(g => persistItem('gastosFijos', g));
     if (recetaCambiada) persistItem('recetas', recetaCambiada);
     saveState();
   }
@@ -1886,6 +1909,16 @@ function todayStr() {
   const m = String(now.getMonth() + 1).padStart(2, '0');
   const d = String(now.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
+}
+// Hora local actual en formato "HH:MM", para precargar el campo Hora al
+// crear un pedido nuevo (antes quedaba fijo en 12:00 y había que corregirlo
+// a mano siempre). Solo se usa como valor inicial: si el usuario la cambia,
+// eso es lo que se guarda.
+function horaActualStr() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
 }
 // Suma (o resta, con negativos) días a una fecha "YYYY-MM-DD" y devuelve otra "YYYY-MM-DD"
 function addDiasStr(fechaStr, dias) {
@@ -2053,7 +2086,6 @@ function exportarDatos() {
     notas: state.notas,
     recetas: state.recetas,
     catalogo: state.catalogo,
-    gastosFijos: state.gastosFijos,
     config: state.config,
     nextId: state.nextId,
     _exportadoEl: todayStr(),
@@ -2101,7 +2133,7 @@ function handleImportFile(event) {
     }
 
     // Validación mínima: que tenga al menos algunas de las claves esperadas
-    const clavesEsperadas = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','gastosFijos','config'];
+    const clavesEsperadas = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','config'];
     const tieneAlguna = clavesEsperadas.some(k => k in data);
     if (!tieneAlguna) {
       showToast('❌ El archivo no parece un backup válido');
@@ -2110,7 +2142,7 @@ function handleImportFile(event) {
 
     showConfirm(
       '¿Restaurar backup?',
-      'Esto va a REEMPLAZAR todos los datos actuales (pedidos, ingredientes, movimientos, notas, recetas, catálogo, gastos fijos y configuración) por los del archivo. No se puede deshacer.',
+      'Esto va a REEMPLAZAR todos los datos actuales (pedidos, ingredientes, movimientos, notas, recetas, catálogo y configuración) por los del archivo. No se puede deshacer.',
       async () => {
         state.pedidos = (data.pedidos || []).map(normalizarPedido);
         state.ingredientes = data.ingredientes || [];
@@ -2118,7 +2150,6 @@ function handleImportFile(event) {
         state.notas = data.notas || [];
         state.recetas = data.recetas || [];
         state.catalogo = data.catalogo || [];
-        state.gastosFijos = data.gastosFijos || [];
         state.config = { ...state.config, ...(data.config || {}) };
         state.nextId = data.nextId || state.nextId;
 
@@ -2300,8 +2331,8 @@ function renderScreen(screen) {
   if (renders[screen]) renders[screen]();
 }
 
-/* -------- COSTOS (contenedor: Ingredientes + Recetas + Gastos fijos) -------- */
-let costosSubtab = 'ingredientes'; // 'ingredientes' | 'recetas' | 'gastosfijos'
+/* -------- COSTOS (contenedor: Ingredientes + Recetas) -------- */
+let costosSubtab = 'ingredientes'; // 'ingredientes' | 'recetas'
 
 function setCostosSubtab(tab) {
   costosSubtab = tab;
@@ -2317,7 +2348,6 @@ function costosSubtabsHtml() {
   const tabs = [
     { key: 'ingredientes', label: '🧂 Ingredientes' },
     { key: 'recetas',      label: '📋 Recetas' },
-    { key: 'gastosfijos',  label: '💸 Gastos fijos' },
   ];
   return tabs.map(t => {
     const active = costosSubtab === t.key;
@@ -2336,14 +2366,11 @@ function renderCostos() {
 
   const secIngredientes = document.getElementById('screen-ingredientes');
   const secRecetas = document.getElementById('screen-recetas');
-  const secGastosFijos = document.getElementById('screen-gastosfijos');
   if (secIngredientes) secIngredientes.style.display = costosSubtab === 'ingredientes' ? '' : 'none';
   if (secRecetas) secRecetas.style.display = costosSubtab === 'recetas' ? '' : 'none';
-  if (secGastosFijos) secGastosFijos.style.display = costosSubtab === 'gastosfijos' ? '' : 'none';
 
   if (costosSubtab === 'ingredientes') renderIngredientes();
   else if (costosSubtab === 'recetas') renderRecetas();
-  else if (costosSubtab === 'gastosfijos') renderGastosFijosScreen();
 }
 
 /* -------- INICIO -------- */
@@ -2440,7 +2467,6 @@ function renderInicio() {
     ${renderNotifBanner()}
     ${renderAtrasadosBanner()}
     ${renderStockComprometidoBanner()}
-    ${renderGastosFijosBanner()}
     ${renderBackupBanner()}
 
     <div class="dash-top-grid">
@@ -3749,7 +3775,7 @@ function openPedidoForm(id, datosImportados) {
       </div>
       <div style="flex:1">
         <label class="form-label">Hora</label>
-        <input class="form-input" id="f-hora" type="time" value="${p?.hora||'12:00'}">
+        <input class="form-input" id="f-hora" type="time" value="${p?.hora || horaActualStr()}">
       </div>
     </div>
     <div class="form-group">
@@ -4929,7 +4955,7 @@ function savePedidoConfirmado(id) {
     cantidad: _pedidoItems.reduce((s, i) => s + i.cantidad, 0),
     precio,
     fechaEntrega: fecha,
-    hora: document.getElementById('f-hora').value || '12:00',
+    hora: document.getElementById('f-hora').value || horaActualStr(),
     estado: document.getElementById('f-estado').value,
     montoPagado: Math.max(0, Number(document.getElementById('f-monto-pagado').value) || 0),
     metodoPago: document.getElementById('f-metodo-pago')?.value || 'efectivo',
@@ -5074,7 +5100,7 @@ function renderRecetas() {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
       <div class="section-sub" style="margin-bottom:0">Se descuentan automáticamente en Materia prima al crear un pedido</div>
       <div style="display:flex;gap:6px">
-        <button class="btn btn-ghost btn-sm" onclick="openConfigCostosForm()" title="Configurar costo de mano de obra y gastos fijos">⚙️</button>
+        <button class="btn btn-ghost btn-sm" onclick="openConfigCostosForm()" title="Configurar costo de mano de obra, gas y costo fijo por hora">⚙️</button>
         <button class="btn btn-ghost btn-sm" onclick="openCatalogo()">🛒 Productos</button>
         <button class="btn btn-primary btn-sm" onclick="openRecetaForm(null)">+ Receta</button>
       </div>
@@ -5084,255 +5110,23 @@ function renderRecetas() {
   `;
 }
 
-/* -------- GASTOS FIJOS -------- */
-// Fecha estimada del próximo pago = ultimoPago + cadaXDias.
-// Si el gasto todavía no tiene ultimoPago cargado (datos viejos, previos a esta migración),
-// se asume que el último pago fue "hoy - cadaXDias", para que quede como "vence hoy/ya" y
-// no se rompa nada existente.
-function proximaFechaPagoGasto(g) {
-  const ultimoPago = g.ultimoPago || addDiasStr(todayStr(), -g.cadaXDias);
-  return addDiasStr(ultimoPago, g.cadaXDias);
-}
-// null = al día, 'yellow' = vence en 3 días o menos, 'red' = ya venció
-function estadoPagoGastoFijo(g) {
-  const dias = diffDiasDesdeHoy(proximaFechaPagoGasto(g));
-  if (dias < 0) return 'red';
-  if (dias <= 3) return 'yellow';
-  return null;
-}
-function gastosFijosPorVencerOVencidos() {
-  return (state.gastosFijos || []).filter(g => estadoPagoGastoFijo(g) !== null);
-}
-
-function renderGastosFijosScreen() {
-  const el = document.getElementById('screen-gastosfijos');
-  el.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div class="section-sub" style="margin-bottom:0">Gas, papelería y otros gastos recurrentes, para prorratear en el costo real</div>
-      <button class="btn btn-primary btn-sm" onclick="openGastoFijoForm(null)">+ Gasto</button>
-    </div>
-    <div style="height:10px"></div>
-    ${renderGastosFijosList()}
-  `;
-}
-
-function renderGastosFijosList() {
-  if (!state.gastosFijos || state.gastosFijos.length === 0) {
-    return `<div class="empty-state" style="padding:20px 0"><div class="empty-icon">💸</div><p>Sin gastos fijos. Tocá + para agregar.</p></div>`;
-  }
-  return `<div class="list-2col">${state.gastosFijos.map(g => {
-    const mensual = Math.round((g.monto / g.cadaXDias) * 30);
-    const proxFecha = proximaFechaPagoGasto(g);
-    const estado = estadoPagoGastoFijo(g);
-    const dias = diffDiasDesdeHoy(proxFecha);
-    const colorVar = estado === 'red' ? 'var(--red)' : estado === 'yellow' ? 'var(--yellow)' : 'var(--text2)';
-    const colorBg = estado === 'red' ? 'var(--red-light)' : estado === 'yellow' ? 'var(--yellow-light)' : 'transparent';
-    const vencLabel = dias < 0
-      ? `Venció hace ${Math.abs(dias)} día${Math.abs(dias) !== 1 ? 's' : ''}`
-      : dias === 0
-        ? 'Vence hoy'
-        : `Vence en ${dias} día${dias !== 1 ? 's' : ''}`;
-    return `
-      <div class="ingredient-item anim-in" ${estado ? `style="border:1.5px solid ${colorVar};background:${colorBg}"` : ''}>
-        <div class="ingredient-header">
-          <div class="ingredient-name">${esc(g.nombre)}</div>
-          <span style="font-size:13px;font-weight:700;color:var(--accent)">${fmt(mensual)}/mes</span>
-        </div>
-        <div class="ingredient-amounts">${fmt(g.monto)} cada ${g.cadaXDias} días</div>
-        <div style="font-size:12px;font-weight:600;color:${colorVar};margin-top:4px">📅 Próximo pago: ${fmtDate(proxFecha)} · ${vencLabel}</div>
-        <div class="ingredient-actions">
-          <button class="btn btn-ghost btn-sm" onclick="marcarGastoFijoPagado(${g.id})">✅ Pagado hoy</button>
-          <button class="btn btn-ghost btn-sm" onclick="openGastoFijoForm(${g.id})">✏️ Editar</button>
-          <button class="btn btn-danger btn-sm" onclick="confirmEliminarGastoFijo(${g.id})">🗑</button>
-        </div>
-      </div>`;
-  }).join('')}</div>`;
-}
-
-function openGastoFijoForm(id) {
-  const g = id ? state.gastosFijos.find(x => x.id === id) : null;
-  const tipos = [
-    { v: 'gas', l: '🔥 Gas' },
-    { v: 'papeleria', l: '📋 Papelería' },
-    { v: 'mantenimiento', l: '🔧 Mantenimiento' },
-    { v: 'otro', l: '💸 Otro' },
-  ];
-  const tipoOpts = tipos.map(t => `<option value="${t.v}" ${(g?.tipo||'otro')===t.v?'selected':''}>${t.l}</option>`).join('');
-  openModal(`
-    <div class="modal-title">${g ? 'Editar gasto fijo' : 'Nuevo gasto fijo'}</div>
-    <div class="form-group">
-      <label class="form-label">Nombre *</label>
-      <input class="form-input" id="f-gasto-nombre" type="text" placeholder="Ej: Gas" value="${g?.nombre||''}">
-    </div>
-    <div class="flex gap-8" style="margin-bottom:14px">
-      <div style="flex:1">
-        <label class="form-label">Monto ($) *</label>
-        <input class="form-input" id="f-gasto-monto" type="text" inputmode="decimal" placeholder="Ej: 28.000" value="${g?.monto||''}">
-      </div>
-      <div style="flex:1">
-        <label class="form-label">Cada cuántos días *</label>
-        <input class="form-input" id="f-gasto-dias" type="number" min="1" step="1" placeholder="Ej: 35" value="${g?.cadaXDias||''}">
-      </div>
-    </div>
-    <div class="form-group">
-      <label class="form-label">Tipo</label>
-      <select class="form-input" id="f-gasto-tipo">${tipoOpts}</select>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
-      <button class="btn btn-primary w-100" onclick="saveGastoFijo(${id||'null'})">💾 Guardar</button>
-    </div>
-  `);
-}
-
-function saveGastoFijo(id) {
-  const nombre = document.getElementById('f-gasto-nombre').value.trim();
-  const monto = parsePrecio(document.getElementById('f-gasto-monto').value);
-  const cadaXDias = parseInt(document.getElementById('f-gasto-dias').value);
-  if (!nombre) { showToast('⚠️ Ingresá un nombre'); return; }
-  if (!monto || monto <= 0) { showToast('⚠️ Ingresá un monto válido'); return; }
-  if (!cadaXDias || cadaXDias <= 0) { showToast('⚠️ Ingresá cada cuántos días'); return; }
-
-  const data = { nombre, monto, cadaXDias, tipo: document.getElementById('f-gasto-tipo').value };
-  let gastoGuardado;
-  if (id) {
-    const idx = state.gastosFijos.findIndex(g => g.id === id);
-    state.gastosFijos[idx] = { ...state.gastosFijos[idx], ...data };
-    gastoGuardado = state.gastosFijos[idx];
-    showToast('✏️ Gasto fijo actualizado');
-  } else {
-    gastoGuardado = { id: nextId(), ...data };
-    state.gastosFijos.push(gastoGuardado);
-    showToast('💸 Gasto fijo agregado');
-  }
-  persistItem('gastosFijos', gastoGuardado);
-  saveState(); closeModal();
-  renderScreen(activeScreen);
-}
-
-function marcarGastoFijoPagado(id) {
-  const g = state.gastosFijos.find(x => x.id === id);
-  if (!g) return;
-  g.ultimoPago = todayStr();
-  persistItem('gastosFijos', g);
-  saveState();
-  showToast(`✅ ${g.nombre} marcado como pagado hoy`);
-  renderGastosFijosScreen();
-}
-
-function confirmEliminarGastoFijo(id) {
-  const g = state.gastosFijos.find(x => x.id === id);
-  showConfirm('¿Eliminar gasto fijo?', `Se eliminará "${g.nombre}".`, () => {
-    state.gastosFijos = state.gastosFijos.filter(x => x.id !== id);
-    removeItem('gastosFijos', id);
-    saveState(); closeModal();
-    showToast('Gasto fijo eliminado');
-    renderGastosFijosScreen();
-  });
-}
-
-/* -------- CARTEL AUTOMÁTICO DE GASTOS FIJOS --------
-   Se muestra como mucho 1 vez por día por dispositivo (guardado en
-   localStorage, es intencional que NO sincronice entre dispositivos:
-   cada uno tiene su propio "ya lo vi hoy"). Por cada gasto pendiente
-   o vencido, el usuario elige una acción y esa fila se cierra:
-     - Pagar: registra el pago real (mismo efecto que "Pagado hoy").
-     - Posponer: no pasa nada más hoy; mañana, si sigue pendiente,
-       vuelve a aparecer en el cartel.
-     - Ignorar: no vuelve a aparecer para ESE vencimiento puntual
-       (se guarda la fecha de vencimiento ignorada); en cuanto el
-       gasto se pague y el vencimiento cambie, vuelve a poder avisar.
------------------------------------------------------------- */
-const LS_GASTOFIJO_ULTIMO_AVISO = 'toque_gastofijo_ultimo_aviso';
-const LS_GASTOFIJO_IGNORADOS = 'toque_gastofijo_ignorados';
-let _cartelGastosFijosMostradoEstaSesion = false;
-
-function obtenerIgnoradosGastoFijo() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_GASTOFIJO_IGNORADOS) || '{}');
-  } catch (e) {
-    return {};
-  }
-}
-function guardarIgnoradosGastoFijo(ignorados) {
-  localStorage.setItem(LS_GASTOFIJO_IGNORADOS, JSON.stringify(ignorados));
-}
-
-function chequearCartelGastosFijos() {
-  if (_cartelGastosFijosMostradoEstaSesion) return;
-  if (localStorage.getItem(LS_GASTOFIJO_ULTIMO_AVISO) === todayStr()) return;
-  const ignorados = obtenerIgnoradosGastoFijo();
-  const pendientes = gastosFijosPorVencerOVencidos()
-    .filter(g => ignorados[g.id] !== proximaFechaPagoGasto(g));
-  if (pendientes.length === 0) return;
-  _cartelGastosFijosMostradoEstaSesion = true;
-  localStorage.setItem(LS_GASTOFIJO_ULTIMO_AVISO, todayStr());
-  abrirCartelGastosFijos(pendientes);
-}
-
-function abrirCartelGastosFijos(pendientes) {
-  const fila = (g) => {
-    const estado = estadoPagoGastoFijo(g);
-    const colorVar = estado === 'red' ? 'var(--red)' : 'var(--yellow)';
-    const dias = diffDiasDesdeHoy(proximaFechaPagoGasto(g));
-    const vencLabel = dias < 0
-      ? `Venció hace ${Math.abs(dias)} día${Math.abs(dias) !== 1 ? 's' : ''}`
-      : dias === 0 ? 'Vence hoy' : `Vence en ${dias} día${dias !== 1 ? 's' : ''}`;
-    return `
-      <div class="ingredient-item anim-in" id="cartel-gasto-row-${g.id}" style="border:1.5px solid ${colorVar}">
-        <div class="ingredient-header">
-          <div class="ingredient-name">${esc(g.nombre)}</div>
-          <span style="font-size:13px;font-weight:700;color:var(--accent)">${fmt(g.monto)}</span>
-        </div>
-        <div style="font-size:12px;font-weight:600;color:${colorVar};margin-bottom:8px">${vencLabel}</div>
-        <div class="ingredient-actions">
-          <button class="btn btn-primary btn-sm" onclick="cartelGastoAccion(${g.id},'pagar')">💰 Pagar</button>
-          <button class="btn btn-ghost btn-sm" onclick="cartelGastoAccion(${g.id},'posponer')">⏰ Posponer</button>
-          <button class="btn btn-ghost btn-sm" onclick="cartelGastoAccion(${g.id},'ignorar')">🚫 Ignorar</button>
-        </div>
-      </div>`;
-  };
-  openModal(`
-    <div class="modal-title">💸 Gastos fijos por atender</div>
-    <div style="font-size:11px;color:var(--text3);margin-bottom:12px">Elegí qué hacer con cada uno. "Posponer" te lo vuelve a mostrar mañana; "Ignorar" no te avisa de nuevo hasta que cambie el vencimiento.</div>
-    <div id="cartel-gastos-lista">${pendientes.map(fila).join('')}</div>
-    <div class="modal-actions">
-      <button class="btn btn-ghost w-100" onclick="closeModal()">Cerrar</button>
-    </div>
-  `);
-}
-
-function cartelGastoAccion(id, accion) {
-  const g = state.gastosFijos.find(x => x.id === id);
-  if (!g) return;
-  if (accion === 'pagar') {
-    marcarGastoFijoPagado(id);
-  } else if (accion === 'ignorar') {
-    const ignorados = obtenerIgnoradosGastoFijo();
-    ignorados[id] = proximaFechaPagoGasto(g);
-    guardarIgnoradosGastoFijo(ignorados);
-    showToast(`🚫 No te vamos a avisar más de "${g.nombre}" hasta el próximo vencimiento`);
-  }
-  // 'posponer' no necesita guardar nada: el gate de una vez por día ya
-  // impide que vuelva a aparecer hoy, y mañana se reevalúa de cero.
-  const row = document.getElementById(`cartel-gasto-row-${id}`);
-  if (row) row.remove();
-  const lista = document.getElementById('cartel-gastos-lista');
-  if (lista && lista.children.length === 0) closeModal();
-}
-
 function openConfigCostosForm() {
   openModal(`
     <div class="modal-title">⚙️ Configuración de costos</div>
     <div class="form-group">
-      <label class="form-label">Horas productivas por mes</label>
-      <input class="form-input" id="f-cfg-horas" type="number" min="1" step="1" value="${state.config.horasProductivasMes}">
-      <div style="font-size:11px;color:var(--text3);margin-top:4px">Usadas para prorratear los gastos fijos entre la producción del mes.</div>
-    </div>
-    <div class="form-group">
       <label class="form-label">Valor de tu hora ($)</label>
       <input class="form-input" id="f-cfg-valorhora" type="text" inputmode="decimal" value="${state.config.valorHora}">
       <div style="font-size:11px;color:var(--text3);margin-top:4px">Se usa para sumar mano de obra al costo de cada receta.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Costo de gas por minuto de horno ($)</label>
+      <input class="form-input" id="f-cfg-gasmin" type="text" inputmode="decimal" value="${state.config.costoGasPorMinuto || 0}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Se multiplica por los minutos de horno de cada receta.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Costo fijo por hora productiva ($)</label>
+      <input class="form-input" id="f-cfg-fijohora" type="text" inputmode="decimal" value="${state.config.costoFijoPorHora || 0}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Prorratea otros gastos (alquiler, papelería, etc.) por hora de producción de cada receta.</div>
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost w-100" onclick="closeModal()">Cancelar</button>
@@ -5342,8 +5136,9 @@ function openConfigCostosForm() {
 }
 
 function saveConfigCostos() {
-  state.config.horasProductivasMes = parseFloat(document.getElementById('f-cfg-horas').value) || state.config.horasProductivasMes;
   state.config.valorHora = parsePrecio(document.getElementById('f-cfg-valorhora').value);
+  state.config.costoGasPorMinuto = parsePrecio(document.getElementById('f-cfg-gasmin').value);
+  state.config.costoFijoPorHora = parsePrecio(document.getElementById('f-cfg-fijohora').value);
   saveState(); closeModal();
   showToast('⚙️ Configuración actualizada');
   renderScreen(activeScreen);
@@ -6222,28 +6017,19 @@ function revertirMateriaPrimaByPedido(detalle) {
    MOTOR DE CÁLCULO — COSTO REAL POR PRODUCTO
 ============================================================ */
 
-// Costo del gas por minuto de horno. Se asume 1 hora de horno fija por día
-// (no depende de las horas productivas del mes ni del tiempo total de la receta).
+// Costo del gas por minuto de horno. Antes se calculaba prorrateando el
+// gasto fijo "Gas" (monto / cadaXDias / 60); ahora que los gastos fijos ya
+// no existen como entidad (se cargan directo como egreso en Finanzas al
+// pagarlos), es un valor manual configurable en Recetas > ⚙️.
 function costoGasPorMinuto() {
-  const gas = (state.gastosFijos || []).find(g => g.tipo === 'gas');
-  if (!gas || !gas.cadaXDias) return 0;
-  const costoDiario = gas.monto / gas.cadaXDias;
-  return costoDiario / 60; // 60 min = la 1 hora de horno diaria
+  return state.config.costoGasPorMinuto || 0;
 }
 
-// Costo fijo por hora productiva: suma todos los gastos fijos mensualizados
-// (excepto 'gas', que ya se prorratea aparte por minuto de horno) y los
-// divide por las horas productivas del mes.
+// Costo fijo por hora productiva. Antes se calculaba sumando los gastos
+// fijos mensualizados (excepto gas) y dividiendo por las horas productivas
+// del mes; ahora es un valor manual $/hora configurable en Recetas > ⚙️.
 function costoFijoPorHoraProductiva() {
-  const horas = state.config.horasProductivasMes;
-  if (!horas) return 0;
-  const totalMensual = (state.gastosFijos || [])
-    .filter(g => g.tipo !== 'gas')
-    .reduce((acc, g) => {
-      if (!g.cadaXDias) return acc;
-      return acc + (g.monto / g.cadaXDias) * 30;
-    }, 0);
-  return totalMensual / horas;
+  return state.config.costoFijoPorHora || 0;
 }
 
 /* ============================================================
@@ -6618,7 +6404,9 @@ function initIngNombreAutocomplete(editingId) {
 let finanzasVista = 'lista'; // 'lista' | 'dia' | 'calendario' | 'reportes'
 let finanzasDiaExpandido = null;
 let repartoMovId = null; // id del movimiento de ingreso seleccionado en el desglose de reparto (Reportes)
-let cierreSemanaSel = 'actual'; // 'actual' | 'anterior' — selector del modal "Cierre de la semana" (Reportes)
+let repartoFecha = ''; // fecha (YYYY-MM-DD) elegida para el desglose de reparto por día (Reportes)
+let cierreSemanaSel = 'actual'; // 'actual' | 'anterior' | 'personalizado' — selector del modal "Cierre de la semana" (Reportes)
+let cierreSemanaPersonalizado = null; // {desde, hasta} — sólo se usa cuando cierreSemanaSel === 'personalizado'; se inicializa la primera vez que se elige esa pestaña
 
 // Presets de reparto por "etapa" del negocio — pensado para que Sofía/Juan
 // puedan elegir manualmente cuál usar a medida que el negocio crece (botones
@@ -6677,59 +6465,45 @@ function calcularIngresosEgresosPorSemana(cantSemanas = 8) {
   return semanas;
 }
 
-// Top productos por cantidad vendida (suma de p.items[].cantidad en todos los pedidos) — O(n)
-// Nota: sólo cuenta pedidos ENTREGADOS (estado 'done'), igual que
-// calcularTopProductosPorIngresos/calcularTopProductosPorGanancia y
-// "Unidades vendidas". Antes contaba TODOS los pedidos (incluidos
-// pendientes/en preparación), lo que daba un ranking distinto e
-// inconsistente con el resto de Reportes.
-function calcularTopProductosPorCantidad(top = 5) {
-  const mapa = new Map();
+// Agrupa, a nivel de VARIANTE (nombreBase, ej: "Docena churros DDL"),
+// cantidad cargada en el pedido, unidades reales (aplicando
+// multiplicadorUnidades: 1 docena = 12, etc) o kg (si se vende por peso,
+// hoy sólo biscochos, vía extraerFraccionProducto/PESO_BASE_KG), ingresos y
+// costo real (vía calcularCostoReceta), sobre TODO el historial de pedidos
+// ENTREGADOS. Es la base común de los 3 rankings de Reportes (Top más
+// vendidos / más ingresos / ranking por ganancia), que agrupan estas
+// variantes por familia más abajo (calcularVentasAgrupadas).
+function calcularVentasPorVariante() {
+  const mapa = new Map(); // nombreBase -> {nombreBase, familia, esPeso, cantidad, unidades, pesoKg, ingresos, costoTotal, sinReceta}
   state.pedidos.forEach(p => {
     if (p.estado !== 'done') return;
     (p.items || []).forEach(it => {
-      const nombre = (it.producto || '').trim();
-      if (!nombre) return;
-      mapa.set(nombre, (mapa.get(nombre) || 0) + (Number(it.cantidad) || 0));
-    });
-  });
-  return [...mapa.entries()]
-    .map(([producto, cantidad]) => ({ producto, cantidad }))
-    .sort((a, b) => b.cantidad - a.cantidad)
-    .slice(0, top);
-}
-
-// Top productos por ingresos generados (suma de p.items[].subtotal en pedidos entregados) — O(n)
-function calcularTopProductosPorIngresos(top = 5) {
-  const ventas = calcularVentasPorProducto();
-  return [...ventas.values()]
-    .map(v => ({ producto: v.producto, ingresos: v.ingresos, gananciaPct: v.gananciaPct }))
-    .sort((a, b) => b.ingresos - a.ingresos)
-    .slice(0, top);
-}
-
-// Agrupa, por producto, cantidad vendida / ingresos / costo real / ganancia,
-// tomando solo pedidos "Entregado" (son los que ya se cobraron de verdad).
-// El costo real sale de la receta cargada en Costos; si un producto no tiene
-// receta, gananciaPesos/gananciaPct quedan en null (no podemos calcularlo).
-function calcularVentasPorProducto() {
-  const mapa = new Map();
-  state.pedidos.forEach(p => {
-    if (p.estado !== 'done') return;
-    (p.items || []).forEach(it => {
-      const nombre = (it.producto || '').trim();
-      if (!nombre) return;
+      const nombreItem = (it.producto || '').trim();
+      if (!nombreItem) return;
       const cantidad = Number(it.cantidad) || 0;
+      if (cantidad <= 0) return;
       const ingresos = Number(it.subtotal) || 0;
-      if (!mapa.has(nombre)) {
-        mapa.set(nombre, { producto: nombre, cantidad: 0, ingresos: 0, costoTotal: 0, sinReceta: false });
-      }
-      const bucket = mapa.get(nombre);
-      bucket.cantidad += cantidad;
-      bucket.ingresos += ingresos;
 
-      const esItemPorcion = esPorcion(nombre);
-      const nombreBase = esItemPorcion ? nombreBaseProducto(nombre) : nombre;
+      const esItemPorcion = esPorcion(nombreItem);
+      const nombreBase = esItemPorcion ? nombreBaseProducto(nombreItem) : nombreItem;
+      const esPeso = /biscocho/i.test(nombreBase);
+      const familia = familiaProducto(nombreBase);
+
+      if (!mapa.has(nombreBase)) {
+        mapa.set(nombreBase, { nombreBase, familia, esPeso, cantidad: 0, unidades: 0, pesoKg: 0, ingresos: 0, costoTotal: 0, sinReceta: false });
+      }
+      const v = mapa.get(nombreBase);
+      v.cantidad += cantidad;
+      v.ingresos += ingresos;
+
+      if (esPeso) {
+        v.pesoKg += cantidad * extraerFraccionProducto(nombreBase) * PESO_BASE_KG.biscocho;
+      } else {
+        v.unidades += cantidad * multiplicadorUnidades(nombreBase);
+      }
+
+      // Costo real (misma lógica de siempre: receta de nombreBase, prorrateada
+      // por porciones si el item es "(porción)"). No se toca calcularCostoReceta.
       const receta = state.recetas.find(r => r.producto === nombreBase);
       const costo = calcularCostoReceta(receta);
       if (costo) {
@@ -6738,28 +6512,88 @@ function calcularVentasPorProducto() {
           const porciones = receta.porcionesPorUnidad || 1;
           costoUnit = costoUnit / porciones;
         }
-        bucket.costoTotal += costoUnit * cantidad;
+        v.costoTotal += costoUnit * cantidad;
       } else {
-        bucket.sinReceta = true;
+        v.sinReceta = true;
       }
     });
-  });
-
-  mapa.forEach(b => {
-    b.gananciaPesos = b.sinReceta ? null : (b.ingresos - b.costoTotal);
-    b.gananciaPct = (b.gananciaPesos !== null && b.ingresos > 0)
-      ? Math.round((b.gananciaPesos / b.ingresos) * 100)
-      : null;
   });
   return mapa;
 }
 
-// Ranking de productos ordenado por cantidad vendida (más vendidos primero),
-// mostrando cuánta ganancia en pesos (y %) dejó cada uno — sobre pedidos entregados.
+// Agrupa las variantes de calcularVentasPorVariante por familia
+// (familiaProducto: Churros, Alfajores, Tortas, Pastafrolas, Biscochos),
+// sumando unidades reales/kg, ingresos y costo real de todas sus variantes
+// (ej: 2 docenas CH+DDL (24) + 6 simples + 6 rellenos DDL = 36 unidades de
+// "Churros"). Los productos que no matchean ninguna familia (tartas
+// puntuales, ítems sueltos) quedan como fila individual, con el mismo
+// shape (variantes: [ella misma]), para que Reportes pueda tratar familias
+// y productos sueltos de forma uniforme sin código separado para cada caso.
+function calcularVentasAgrupadas() {
+  const variantes = calcularVentasPorVariante();
+  const filas = new Map(); // label (familia o nombreBase) -> fila agrupada
+
+  variantes.forEach(v => {
+    const label = v.familia || v.nombreBase;
+    if (!filas.has(label)) {
+      filas.set(label, {
+        label, esFamilia: !!v.familia, esPeso: v.esPeso,
+        unidades: 0, pesoKg: 0, ingresos: 0, costoTotal: 0, sinReceta: false, variantes: [],
+      });
+    }
+    const f = filas.get(label);
+    f.unidades += v.unidades;
+    f.pesoKg += v.pesoKg;
+    f.ingresos += v.ingresos;
+    f.costoTotal += v.costoTotal;
+    if (v.sinReceta) f.sinReceta = true;
+    if (v.esPeso) f.esPeso = true;
+    f.variantes.push(v);
+  });
+
+  filas.forEach(f => {
+    f.gananciaPesos = f.sinReceta ? null : (f.ingresos - f.costoTotal);
+    f.gananciaPct = (f.gananciaPesos !== null && f.ingresos > 0)
+      ? Math.round((f.gananciaPesos / f.ingresos) * 100)
+      : null;
+  });
+
+  return filas;
+}
+
+// Métrica combinada para ordenar/comparar filas de cantidad vendida mezclando
+// unidades reales y kg (biscochos) — mismo criterio (kg * 1000) que ya se
+// usaba para ordenar el extinto reporte de "Unidades vendidas".
+function metricaCantidadFila(f) {
+  return f.unidades + f.pesoKg * 1000;
+}
+
+// Top familias/productos por cantidad vendida (unidades reales, agrupado
+// por familia). Sólo pedidos ENTREGADOS.
+function calcularTopProductosPorCantidad(top = 5) {
+  const filas = calcularVentasAgrupadas();
+  return [...filas.values()]
+    .sort((a, b) => metricaCantidadFila(b) - metricaCantidadFila(a))
+    .slice(0, top);
+}
+
+// Top familias/productos por ingresos generados (agrupado por familia).
+// Sólo pedidos ENTREGADOS.
+function calcularTopProductosPorIngresos(top = 5) {
+  const filas = calcularVentasAgrupadas();
+  return [...filas.values()]
+    .sort((a, b) => b.ingresos - a.ingresos)
+    .slice(0, top);
+}
+
+// Ranking de familias/productos ordenado por cantidad vendida (más vendidos
+// primero), mostrando cuánta ganancia en pesos (y %) dejó cada uno — sobre
+// pedidos entregados. El costo real se suma por variante (calcularCostoReceta)
+// ANTES de agruparse en la familia, para no perder precisión al agrupar.
 function calcularTopProductosPorGanancia(top = 8) {
-  const ventas = calcularVentasPorProducto();
-  return [...ventas.values()]
-    .sort((a, b) => b.cantidad - a.cantidad)
+  const filas = calcularVentasAgrupadas();
+  return [...filas.values()]
+    .sort((a, b) => metricaCantidadFila(b) - metricaCantidadFila(a))
     .slice(0, top);
 }
 
@@ -6884,16 +6718,85 @@ function fmtPesoKg(kg) {
   return `${kgRedondeado} kg`;
 }
 
-// Recorre los pedidos ENTREGADOS y arma, por producto, cuántas unidades
-// reales se vendieron (o cuántos kg/g, si el producto se vende por peso
-// en vez de por unidad — hoy sólo biscochos), y agrupa esos totales por
-// familia (Churros, Alfajores, Tortas, Pastafrolas, Biscochos).
-function calcularUnidadesVendidasPorProducto() {
-  const porProducto = new Map(); // nombreBase -> { producto, unidades, pesoKg, esPeso, familia }
-  const porFamilia = new Map();  // familia -> { familia, unidades, pesoKg }
+// ------------------------------------------------------------------
+// Cantidad vendida por familia — versión acotada a un RANGO de fechas
+// (a diferencia de calcularVentasPorVariante/calcularVentasAgrupadas, que
+// usa Reportes y es sobre todo el historial). Se usa en "Cierre de la
+// semana" para mostrar cuánto se vendió de cada familia en la semana/rango
+// elegido, con el detalle de qué variantes la componen. Mismo criterio de
+// agrupación (familiaProducto, multiplicadorUnidades,
+// esPorcion/nombreBaseProducto) que esas funciones, sólo que filtrando
+// pedidos entregados por fechaEntrega dentro de [inicio, fin] en vez de
+// recorrer todo el historial.
+// ------------------------------------------------------------------
+
+// Emoji representativo de cada familia, para las listas del modal y el texto compartido.
+const EMOJI_FAMILIA = { Churros: '🥐', Alfajores: '🍫', Tortas: '🎂', Pastafrolas: '🥧', Biscochos: '🍪' };
+
+// Convierte una cantidad de unidades reales a un texto "natural": en
+// docenas/media docena cuando la cantidad es múltiplo de 6, o en unidades
+// sueltas si no. Ej: 48 -> "4 docenas (48 un.)", 18 -> "1 docena y media
+// (18 un.)", 6 -> "media docena (6 un.)", 7 -> "7 un.".
+function fmtUnidadesDocenas(unidades) {
+  const u = Math.round(unidades);
+  if (u <= 0) return '0 un.';
+  if (u % 6 !== 0) return `${u} un.`;
+  const docenas = Math.floor(u / 12);
+  const media = (u % 12) === 6;
+  let txt;
+  if (docenas > 0 && media) txt = `${docenas} docena${docenas !== 1 ? 's' : ''} y media`;
+  else if (docenas > 0) txt = `${docenas} docena${docenas !== 1 ? 's' : ''}`;
+  else txt = 'media docena';
+  return `${txt} (${u} un.)`;
+}
+
+// Total de una familia formateado: kg/g si se vende por peso (Biscochos),
+// o en docenas/unidades si se vende por unidad.
+function fmtCantidadFamilia(f) {
+  if (f.pesoKg > 0) return fmtPesoKg(f.pesoKg);
+  return fmtUnidadesDocenas(f.unidades);
+}
+
+// Nombre "corto" de una variante para el detalle por familia: le saca el
+// prefijo de armado ("Docena de...", "Media docena...", "x8...") y, si
+// aparece, la palabra de la familia (ej. "Churros"), para no repetirla en
+// cada línea del detalle. Es sólo estético — si no matchea nada, devuelve
+// el nombre completo tal cual, así nunca se pierde información.
+function nombreCortoVariante(nombreBase, familia) {
+  let s = String(nombreBase || '');
+  s = s.replace(/^\s*(media\s+docena|docena|x\s*\d+)\s+de\s+/i, '')
+       .replace(/^\s*(media\s+docena|docena|x\s*\d+)\s+/i, '');
+  if (familia) {
+    const raiz = familia.replace(/s$/i, ''); // "Churros" -> "Churro"
+    s = s.replace(new RegExp(raiz + 's?', 'ig'), '');
+  }
+  s = s.replace(/\s{2,}/g, ' ').trim().replace(/^[-,\s]+|[-,\s]+$/g, '');
+  return s || String(nombreBase || '');
+}
+
+// Línea de detalle de una variante dentro de una familia, ej:
+// "2 docenas CH+DDL", "6 simples", "6 rellenos DDL", "1.2 kg surtidos".
+function lineaVarianteFamilia(v) {
+  const corto = nombreCortoVariante(v.nombreBase, v.familia);
+  if (v.esPeso) return `${fmtPesoKg(v.pesoKg)} ${corto}`.trim();
+  const mult = multiplicadorUnidades(v.nombreBase);
+  if (mult === 12) return `${v.cantidad} docena${v.cantidad !== 1 ? 's' : ''} ${corto}`.trim();
+  if (mult === 6) return `${v.cantidad} media${v.cantidad !== 1 ? 's' : ''} docena${v.cantidad !== 1 ? 's' : ''} ${corto}`.trim();
+  return `${v.unidades} ${corto}`.trim();
+}
+
+// Recorre los pedidos ENTREGADOS con fechaEntrega dentro de [inicio, fin]
+// y arma, por variante, cuánto se vendió (reusando/adaptando la lógica de
+// calcularVentasPorVariante: agrupar por nombreBase antes de sumar por
+// familia), separando las familias reconocidas (con su detalle
+// de variantes) de los productos sin familia (que se listan aparte, sin
+// detalle clickeable). Sólo lectura de state.pedidos.
+function calcularCantidadesPorFamiliaRango(inicio, fin) {
+  const porVariante = new Map(); // nombreBase -> {nombreBase, familia, esPeso, cantidad, unidades, pesoKg}
 
   state.pedidos.forEach(p => {
     if (p.estado !== 'done') return;
+    if (!p.fechaEntrega || p.fechaEntrega < inicio || p.fechaEntrega > fin) return;
     (p.items || []).forEach(it => {
       const nombreItem = (it.producto || '').trim();
       if (!nombreItem) return;
@@ -6904,33 +6807,40 @@ function calcularUnidadesVendidasPorProducto() {
       const esPeso = /biscocho/i.test(nombreBase);
       const familia = familiaProducto(nombreBase);
 
-      if (!porProducto.has(nombreBase)) {
-        porProducto.set(nombreBase, { producto: nombreBase, unidades: 0, pesoKg: 0, esPeso, familia });
+      if (!porVariante.has(nombreBase)) {
+        porVariante.set(nombreBase, { nombreBase, familia, esPeso, cantidad: 0, unidades: 0, pesoKg: 0 });
       }
-      const bucket = porProducto.get(nombreBase);
+      const v = porVariante.get(nombreBase);
+      v.cantidad += cantidad;
 
       if (esPeso) {
-        const kgSumar = cantidad * extraerFraccionProducto(nombreBase) * PESO_BASE_KG.biscocho;
-        bucket.pesoKg += kgSumar;
-        if (familia) {
-          if (!porFamilia.has(familia)) porFamilia.set(familia, { familia, unidades: 0, pesoKg: 0 });
-          porFamilia.get(familia).pesoKg += kgSumar;
-        }
+        v.pesoKg += cantidad * extraerFraccionProducto(nombreBase) * PESO_BASE_KG.biscocho;
       } else {
-        const unidadesSumar = cantidad * multiplicadorUnidades(nombreBase);
-        bucket.unidades += unidadesSumar;
-        if (familia) {
-          if (!porFamilia.has(familia)) porFamilia.set(familia, { familia, unidades: 0, pesoKg: 0 });
-          porFamilia.get(familia).unidades += unidadesSumar;
-        }
+        v.unidades += cantidad * multiplicadorUnidades(nombreBase);
       }
     });
   });
 
-  return {
-    productos: [...porProducto.values()].sort((a, b) => (b.unidades + b.pesoKg * 1000) - (a.unidades + a.pesoKg * 1000)),
-    familias: [...porFamilia.values()].sort((a, b) => (b.unidades + b.pesoKg * 1000) - (a.unidades + a.pesoKg * 1000)),
-  };
+  const porFamilia = new Map(); // familia -> {familia, unidades, pesoKg, variantes: []}
+  const sinFamilia = [];
+
+  porVariante.forEach(v => {
+    if (v.familia) {
+      if (!porFamilia.has(v.familia)) porFamilia.set(v.familia, { familia: v.familia, unidades: 0, pesoKg: 0, variantes: [] });
+      const f = porFamilia.get(v.familia);
+      f.unidades += v.unidades;
+      f.pesoKg += v.pesoKg;
+      f.variantes.push(v);
+    } else {
+      sinFamilia.push({ producto: v.nombreBase, unidades: v.unidades, pesoKg: v.pesoKg, esPeso: v.esPeso });
+    }
+  });
+
+  const familias = [...porFamilia.values()].sort((a, b) => (b.unidades + b.pesoKg * 1000) - (a.unidades + a.pesoKg * 1000));
+  familias.forEach(f => f.variantes.sort((a, b) => (b.unidades + b.pesoKg * 1000) - (a.unidades + a.pesoKg * 1000)));
+  sinFamilia.sort((a, b) => (b.unidades + b.pesoKg * 1000) - (a.unidades + a.pesoKg * 1000));
+
+  return { familias, sinFamilia };
 }
 
 function renderFinanzas() {
@@ -7141,33 +7051,36 @@ function renderFinanzasCalendario(movs) {
   `;
 }
 
-// Abre un modal con todos los pedidos que incluyen un producto puntual —
-// se usa al tocar un producto en los rankings de "Top productos" (Finanzas > Reportes).
-function verPedidosDeProducto(nombreProducto) {
-  const encontrados = state.pedidos.filter(p =>
-    (p.items || []).some(it => (it.producto || '').trim() === nombreProducto)
-  ).sort((a, b) => (b.fechaEntrega || '').localeCompare(a.fechaEntrega || ''));
+// Formatea la cantidad vendida de una fila del ranking (familia o producto
+// individual): kg/g si se vende por peso (hoy sólo Biscochos), o unidades
+// reales si no.
+function fmtCantidadRanking(f) {
+  return f.pesoKg > 0 ? fmtPesoKg(f.pesoKg) : `${f.unidades} un.`;
+}
 
-  const filas = encontrados.map(p => {
-    const item = (p.items || []).find(it => (it.producto || '').trim() === nombreProducto);
-    return `
-      <div class="finance-item anim-in" style="cursor:pointer" onclick="closeModal();setTimeout(()=>openPedidoDetalle(${p.id}),300)">
-        <div class="finance-dot income">📦</div>
-        <div class="finance-info">
-          <div class="finance-desc">${esc(p.cliente)} · ${item ? item.cantidad : ''}x ${esc(nombreProducto)}</div>
-          <div class="finance-date">${fmtDate(p.fechaEntrega)} · <span class="badge ${estadoBadge(p.estado)}">${estadoLabel(p.estado)}</span></div>
-        </div>
-        <div class="finance-amount income">${fmt(item ? item.subtotal : 0)}</div>
-      </div>`;
-  }).join('');
+// Abre un modal con el detalle de qué variantes componen el total vendido
+// de una fila del ranking de Reportes (Top más vendidos / más ingresos /
+// ranking por ganancia). Si la fila es una familia (Churros, Alfajores...)
+// lista sus variantes (ej. "2 docenas CH+DDL", "6 simples", "6 rellenos
+// DDL"); si es un producto individual sin familia, lista esa única
+// variante — misma función para ambos casos (calcularVentasAgrupadas ya
+// arma el producto individual con el mismo shape que una familia de 1 sola
+// variante), reusando el formateo de lineaVarianteFamilia que ya usa el
+// detalle de "Cierre de la semana".
+function verDetalleProductoReporte(label) {
+  const filas = calcularVentasAgrupadas();
+  const f = filas.get(label);
+  if (!f) { closeModal(); return; }
+
+  const lineas = [...f.variantes]
+    .sort((a, b) => (b.unidades + b.pesoKg * 1000) - (a.unidades + a.pesoKg * 1000))
+    .map(v => `<div style="padding:7px 0;border-bottom:1px solid var(--border);font-size:12.5px;color:var(--text2)">${esc(lineaVarianteFamilia(v))}</div>`)
+    .join('');
 
   openModal(`
-    <div class="modal-title">📦 Pedidos con "${esc(nombreProducto)}"</div>
-    <div style="font-size:11px;color:var(--text3);margin-bottom:12px">${encontrados.length} pedido${encontrados.length !== 1 ? 's' : ''} encontrado${encontrados.length !== 1 ? 's' : ''}</div>
-    ${encontrados.length === 0
-      ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">No se encontraron pedidos con este producto</p></div>`
-      : filas
-    }
+    <div class="modal-title">${f.esFamilia ? `${EMOJI_FAMILIA[f.label] || '🧺'} ` : ''}${esc(f.label)}</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Total vendido: <span style="font-weight:700;color:var(--accent)">${fmtCantidadRanking(f)}</span></div>
+    ${lineas || `<div class="empty-state" style="padding:12px 0"><p style="font-size:12px">Sin detalle</p></div>`}
     <div class="modal-actions">
       <button class="btn btn-primary w-100" onclick="closeModal()">Cerrar</button>
     </div>
@@ -7182,7 +7095,7 @@ function renderReportes() {
   const topGanancia = calcularTopProductosPorGanancia(8);
 
   const rankRow = (label, valueLabel, pct, colorVar) => `
-    <div onclick="verPedidosDeProducto(decodeURIComponent('${encodeURIComponent(label)}'))"
+    <div onclick="verDetalleProductoReporte(decodeURIComponent('${encodeURIComponent(label)}'))"
       style="display:flex;align-items:center;gap:10px;margin-bottom:10px;cursor:pointer">
       <div style="flex:1;min-width:0">
         <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;margin-bottom:4px">
@@ -7196,55 +7109,35 @@ function renderReportes() {
       <span style="color:var(--text3);font-size:16px">›</span>
     </div>`;
 
-  // Fila del ranking por ganancia: producto + cantidad vendida a la izquierda,
-  // ganancia en pesos (y %) a la derecha. Si no hay receta cargada, avisa en vez de inventar un número.
-  const gananciaRow = (t, maxCant) => {
+  // Fila del ranking por ganancia: familia/producto + cantidad vendida a la
+  // izquierda, ganancia en pesos (y %) a la derecha. Si no hay receta
+  // cargada para alguna de sus variantes, avisa en vez de inventar un número.
+  const gananciaRow = (t, maxMetrica) => {
     const gananciaLabel = t.gananciaPesos === null
       ? `<span style="font-weight:700;color:var(--text)">${fmt(t.ingresos)}</span> <span style="color:var(--text3);font-size:11px">(sin receta cargada)</span>`
       : `<span style="font-weight:700;color:var(--text)">${fmt(t.ingresos)}</span> <span style="font-weight:600;color:var(--green);font-size:11.5px">(${t.gananciaPesos>=0?'+':''}${fmt(t.gananciaPesos)})</span>`;
     return `
-      <div onclick="verPedidosDeProducto(decodeURIComponent('${encodeURIComponent(t.producto)}'))"
+      <div onclick="verDetalleProductoReporte(decodeURIComponent('${encodeURIComponent(t.label)}'))"
         style="display:flex;align-items:center;gap:10px;margin-bottom:10px;cursor:pointer">
         <div style="flex:1;min-width:0">
           <div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;margin-bottom:4px;align-items:baseline">
-            <span style="font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.producto}</span>
+            <span style="font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.label}</span>
             <span style="white-space:nowrap">${gananciaLabel}</span>
           </div>
           <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
             <div style="background:var(--surface2);border-radius:6px;height:7px;overflow:hidden;flex:1">
-              <div style="width:${Math.max(6, (t.cantidad / maxCant) * 100)}%;height:100%;background:var(--accent);border-radius:6px"></div>
+              <div style="width:${Math.max(6, (metricaCantidadFila(t) / maxMetrica) * 100)}%;height:100%;background:var(--accent);border-radius:6px"></div>
             </div>
-            <span style="font-size:10.5px;color:var(--text3);white-space:nowrap">${t.cantidad} un.</span>
+            <span style="font-size:10.5px;color:var(--text3);white-space:nowrap">${fmtCantidadRanking(t)}</span>
           </div>
         </div>
         <span style="color:var(--text3);font-size:16px">›</span>
       </div>`;
   };
 
-  const maxCant = Math.max(1, ...topCantidad.map(t => t.cantidad));
+  const maxCant = Math.max(1, ...topCantidad.map(metricaCantidadFila));
   const maxIng = Math.max(1, ...topIngresos.map(t => t.ingresos));
-  const maxCantGanancia = Math.max(1, ...topGanancia.map(t => t.cantidad));
-
-  // -------- Unidades vendidas (por familia y por producto) --------
-  const { productos: unidadesProductos, familias: unidadesFamilias } = calcularUnidadesVendidasPorProducto();
-
-  const filaFamilia = (f) => {
-    const valor = f.pesoKg > 0 ? fmtPesoKg(f.pesoKg) : `${f.unidades} un.`;
-    return `
-      <div style="display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;border-bottom:1px solid var(--border)">
-        <span style="font-weight:700;font-size:13px;color:var(--text)">${f.familia}</span>
-        <span style="font-weight:700;font-size:13px;color:var(--accent)">${valor}</span>
-      </div>`;
-  };
-
-  const filaProducto = (t) => {
-    const valor = t.esPeso ? fmtPesoKg(t.pesoKg) : `${t.unidades} un.`;
-    return `
-      <div style="display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;gap:8px">
-        <span style="font-size:12.5px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.producto}</span>
-        <span style="font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap">${valor}</span>
-      </div>`;
-  };
+  const maxCantGanancia = Math.max(1, ...topGanancia.map(metricaCantidadFila));
 
   return `
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-bottom:16px;box-shadow:var(--shadow);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
@@ -7305,7 +7198,7 @@ function renderReportes() {
         <div style="font-size:11px;color:var(--text3);margin-bottom:10px;margin-top:-6px">Sobre pedidos entregados</div>
         ${topCantidad.length === 0
           ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">Todavía no hay pedidos entregados</p></div>`
-          : topCantidad.map(t => rankRow(t.producto, `${t.cantidad} un.`, Math.max(6, (t.cantidad / maxCant) * 100), 'var(--accent)')).join('')
+          : topCantidad.map(t => rankRow(t.label, fmtCantidadRanking(t), Math.max(6, (metricaCantidadFila(t) / maxCant) * 100), 'var(--accent)')).join('')
         }
       </div>
 
@@ -7314,7 +7207,7 @@ function renderReportes() {
         <div style="font-size:11px;color:var(--text3);margin-bottom:10px;margin-top:-6px">Sobre pedidos entregados</div>
         ${topIngresos.length === 0
           ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">Todavía no hay pedidos entregados</p></div>`
-          : topIngresos.map(t => rankRow(t.producto, `${fmt(t.ingresos)}${t.gananciaPct !== null ? ` <span style="font-size:11px">(${t.gananciaPct}%)</span>` : ''}`, Math.max(6, (t.ingresos / maxIng) * 100), 'var(--green)')).join('')
+          : topIngresos.map(t => rankRow(t.label, `${fmt(t.ingresos)}${t.gananciaPct !== null ? ` <span style="font-size:11px">(${t.gananciaPct}%)</span>` : ''}`, Math.max(6, (t.ingresos / maxIng) * 100), 'var(--green)')).join('')
         }
       </div>
 
@@ -7326,19 +7219,6 @@ function renderReportes() {
           : topGanancia.map(t => gananciaRow(t, maxCantGanancia)).join('')
         }
       </div>
-    </div>
-
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-top:12px;box-shadow:var(--shadow)">
-      <div style="font-weight:700;font-size:14px;color:var(--text);margin-bottom:2px">📏 Unidades vendidas</div>
-      <div style="font-size:11px;color:var(--text3);margin-bottom:10px">Sobre pedidos entregados · churros, alfajores y tortas en unidades reales · biscochos en kg/g</div>
-      ${unidadesFamilias.length === 0 && unidadesProductos.length === 0
-        ? `<div class="empty-state" style="padding:16px 0"><p style="font-size:12px">Todavía no hay pedidos entregados</p></div>`
-        : `
-          ${unidadesFamilias.length > 0 ? `<div style="margin-bottom:12px">${unidadesFamilias.map(filaFamilia).join('')}</div>` : ''}
-          <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:4px">Detalle por producto</div>
-          ${unidadesProductos.map(filaProducto).join('')}
-        `
-      }
     </div>
 
     <div style="font-size:11.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.03em;margin:16px 0 8px">🛠️ Herramientas</div>
@@ -7394,8 +7274,25 @@ function calcularRepartoPesos(neto, rCustom) {
   return { materiaPrima, ahorro, sueldo, colchon, r };
 }
 
-function calcularCierreSemana(sel) {
-  const { inicio, fin } = rangoSemanaCierre(sel);
+// Traduce el selector del modal ('actual'/'anterior'/'personalizado') al
+// argumento que espera calcularCierreSemana: para 'actual'/'anterior' es
+// el propio string (se resuelve con rangoSemanaCierre); para 'personalizado'
+// es directamente el {inicio, fin} elegido por el usuario, sin pasar por
+// rangoSemanaCierre (que sólo sabe calcular semanas fijas).
+function argsCierreSemana(sel) {
+  if (sel === 'personalizado' && cierreSemanaPersonalizado) {
+    return { inicio: cierreSemanaPersonalizado.desde, fin: cierreSemanaPersonalizado.hasta };
+  }
+  return sel;
+}
+
+// selOrRango puede ser:
+//  - un string ('actual' | 'anterior'), que se resuelve con rangoSemanaCierre()
+//  - un objeto {inicio, fin} ya armado (rango "Personalizado"), que se usa directo
+function calcularCierreSemana(selOrRango) {
+  const { inicio, fin } = (typeof selOrRango === 'object' && selOrRango !== null)
+    ? selOrRango
+    : rangoSemanaCierre(selOrRango);
   const movs = movimientosEnRango(inicio, fin);
   const ingresos = movs.filter(m => m.tipo === 'income').reduce((s, m) => s + m.monto, 0);
   const egresos = movs.filter(m => m.tipo === 'expense').reduce((s, m) => s + m.monto, 0);
@@ -7421,20 +7318,34 @@ function calcularCierreSemana(sel) {
 
   const { materiaPrima, ahorro, sueldo, colchon, r } = calcularRepartoPesos(neto);
 
-  return { inicio, fin, ingresos, egresos, neto, pedidosEntregados, metodoPago, r, reparto: { materiaPrima, ahorro, sueldo, colchon } };
+  // Desglose de cantidad vendida por familia (Churros, Alfajores, Tortas,
+  // Pastafrolas, Biscochos) + productos sin familia, acotado al mismo rango.
+  const cantidadesFamilia = calcularCantidadesPorFamiliaRango(inicio, fin);
+
+  return { inicio, fin, ingresos, egresos, neto, pedidosEntregados, metodoPago, r, reparto: { materiaPrima, ahorro, sueldo, colchon }, cantidadesFamilia };
 }
 
 function textoCierreSemana(sel) {
-  const d = calcularCierreSemana(sel);
+  const d = calcularCierreSemana(argsCierreSemana(sel));
   const rangoTxt = d.inicio === d.fin ? fmtDate(d.inicio) : `${fmtDate(d.inicio)} al ${fmtDate(d.fin)}`;
-  const { reparto, r, metodoPago } = d;
+  const { reparto, r, metodoPago, cantidadesFamilia } = d;
+
+  const bloqueFamilias = cantidadesFamilia.familias
+    .map(f => `${EMOJI_FAMILIA[f.familia] || '🧺'} ${f.familia}: ${fmtCantidadFamilia(f)}`)
+    .join('\n');
+  const bloqueSinFamilia = cantidadesFamilia.sinFamilia
+    .map(p => `• ${p.producto}: ${p.esPeso ? fmtPesoKg(p.pesoKg) : `${p.unidades} un.`}`)
+    .join('\n');
+  const seccionCantidades = (bloqueFamilias || bloqueSinFamilia)
+    ? `\n\n📦 Cantidad vendida:\n${[bloqueFamilias, bloqueSinFamilia].filter(Boolean).join('\n')}`
+    : '';
 
   return `💰 *Cierre semana* — ${rangoTxt}
 
 Ingresos: ${fmt(d.ingresos)}
 Egresos: ${fmt(d.egresos)}
 Neto: ${fmt(d.neto)}
-Pedidos entregados: ${d.pedidosEntregados}
+Pedidos entregados: ${d.pedidosEntregados}${seccionCantidades}
 
 💵 Efectivo: ${fmt(metodoPago.ingresosEfectivo)} ingresos / ${fmt(metodoPago.egresosEfectivo)} egresos
 🏦 Transferencia: ${fmt(metodoPago.ingresosTransferencia)} ingresos / ${fmt(metodoPago.egresosTransferencia)} egresos
@@ -7447,7 +7358,8 @@ Pedidos entregados: ${d.pedidosEntregados}
 }
 
 function renderCierreSemanaModal() {
-  const d = calcularCierreSemana(cierreSemanaSel);
+  const args = argsCierreSemana(cierreSemanaSel);
+  const d = calcularCierreSemana(args);
   const rangoTxt = d.inicio === d.fin ? fmtDate(d.inicio) : `${fmtDate(d.inicio)} al ${fmtDate(d.fin)}`;
   const texto = textoCierreSemana(cierreSemanaSel);
 
@@ -7458,12 +7370,58 @@ function renderCierreSemanaModal() {
         background:${cierreSemanaSel === sel ? 'var(--accent-light)' : 'var(--surface)'};
         color:${cierreSemanaSel === sel ? 'var(--accent)' : 'var(--text2)'}">${label}</div>`;
 
+  // Pestaña "Personalizado": dos inputs de fecha. Si "desde" quedó después
+  // de "hasta", se avisa en vez de mostrar un rango vacío sin explicación
+  // (movimientosEnRango simplemente no devuelve nada si inicio > fin).
+  const rangoInvalido = cierreSemanaSel === 'personalizado' && cierreSemanaPersonalizado
+    && cierreSemanaPersonalizado.desde > cierreSemanaPersonalizado.hasta;
+  const selectorPersonalizado = cierreSemanaSel === 'personalizado' ? `
+    <div style="display:flex;gap:10px;margin-bottom:${rangoInvalido ? '4' : '14'}px">
+      <div class="form-group" style="flex:1;margin-bottom:0">
+        <label class="form-label">Desde</label>
+        <input class="form-input" id="f-cierre-desde" type="date" value="${cierreSemanaPersonalizado?.desde || ''}" onchange="actualizarCierreSemanaPersonalizado()">
+      </div>
+      <div class="form-group" style="flex:1;margin-bottom:0">
+        <label class="form-label">Hasta</label>
+        <input class="form-input" id="f-cierre-hasta" type="date" value="${cierreSemanaPersonalizado?.hasta || ''}" onchange="actualizarCierreSemanaPersonalizado()">
+      </div>
+    </div>
+    ${rangoInvalido ? `<div style="font-size:11px;color:var(--red);margin-bottom:14px">⚠️ "Desde" no puede ser posterior a "Hasta".</div>` : ''}
+  ` : '';
+
+  // -------- Cantidad vendida por familia (con detalle clickeable) --------
+  const { familias, sinFamilia } = d.cantidadesFamilia;
+  const filaFamiliaClick = (f) => `
+    <div onclick="verDetalleFamiliaCierre('${esc(f.familia)}')"
+      style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);cursor:pointer">
+      <span style="flex:1;font-weight:700;font-size:12.5px;color:var(--text)">${EMOJI_FAMILIA[f.familia] || '🧺'} ${esc(f.familia)}</span>
+      <span style="font-weight:700;font-size:12.5px;color:var(--accent);white-space:nowrap">${fmtCantidadFamilia(f)}</span>
+      <span style="color:var(--text3);font-size:15px">›</span>
+    </div>`;
+  const filaSinFamilia = (p) => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0">
+      <span style="flex:1;font-size:12px;color:var(--text2)">${esc(p.producto)}</span>
+      <span style="font-size:12px;font-weight:600;color:var(--text)">${p.esPeso ? fmtPesoKg(p.pesoKg) : `${p.unidades} un.`}</span>
+    </div>`;
+
+  const seccionCantidades = (familias.length || sinFamilia.length) ? `
+    <div class="divider"></div>
+    <div style="font-weight:700;font-size:12.5px;color:var(--text);margin-bottom:4px">📦 Cantidad vendida</div>
+    ${familias.length ? familias.map(filaFamiliaClick).join('') : ''}
+    ${sinFamilia.length ? `
+      <div style="font-size:10.5px;color:var(--text3);text-transform:uppercase;letter-spacing:.03em;margin:8px 0 2px">Otros productos</div>
+      ${sinFamilia.map(filaSinFamilia).join('')}
+    ` : ''}
+  ` : '';
+
   return `
     <div class="modal-title">📤 Cierre de la semana</div>
     <div style="display:flex;gap:8px;margin-bottom:12px">
       ${tabBtn('actual', 'Semana actual')}
       ${tabBtn('anterior', 'Semana anterior')}
+      ${tabBtn('personalizado', 'Personalizado')}
     </div>
+    ${selectorPersonalizado}
     <div style="font-size:11px;color:var(--text3);margin-bottom:14px">${rangoTxt}</div>
 
     <div class="detail-row"><span class="label">Ingresos</span><span class="value" style="color:var(--green)">${fmt(d.ingresos)}</span></div>
@@ -7473,6 +7431,8 @@ function renderCierreSemanaModal() {
       <span class="value fw-600" style="color:${d.neto >= 0 ? 'var(--green)' : 'var(--red)'}">${fmt(d.neto)}</span>
     </div>
     <div class="detail-row"><span class="label">Pedidos entregados</span><span class="value">${d.pedidosEntregados}</span></div>
+
+    ${seccionCantidades}
 
     <div class="divider"></div>
 
@@ -7507,7 +7467,47 @@ function openCierreSemana() {
 
 function setCierreSemanaSel(sel) {
   cierreSemanaSel = sel;
+  // Al entrar por primera vez a "Personalizado", arrancamos con el mismo
+  // rango que "Semana actual" (hoy-6 .. hoy) como punto de partida razonable.
+  if (sel === 'personalizado' && !cierreSemanaPersonalizado) {
+    cierreSemanaPersonalizado = { desde: addDiasStr(todayStr(), -6), hasta: todayStr() };
+  }
   openModal(renderCierreSemanaModal());
+}
+
+// Se dispara al cambiar cualquiera de los dos inputs de fecha de la
+// pestaña "Personalizado". Recalcula y vuelve a pintar todo el modal
+// (ingresos, egresos, neto, método de pago, pedidos entregados y el
+// desglose de cantidades) para el nuevo rango.
+function actualizarCierreSemanaPersonalizado() {
+  const desde = document.getElementById('f-cierre-desde')?.value;
+  const hasta = document.getElementById('f-cierre-hasta')?.value;
+  if (!desde || !hasta) return;
+  cierreSemanaPersonalizado = { desde, hasta };
+  openModal(renderCierreSemanaModal());
+}
+
+// Detalle de qué variantes componen el total vendido de una familia
+// (ej. Churros -> "2 docenas CH+DDL, 6 simples, 6 rellenos DDL"), para el
+// rango actualmente elegido en el modal (actual/anterior/personalizado).
+// Los productos sin familia no tienen esta vista: no son clickeables.
+function verDetalleFamiliaCierre(nombreFamilia) {
+  const d = calcularCierreSemana(argsCierreSemana(cierreSemanaSel));
+  const f = d.cantidadesFamilia.familias.find(x => x.familia === nombreFamilia);
+  if (!f) { closeModal(); return; }
+
+  const filas = f.variantes.map(v => `
+    <div style="padding:7px 0;border-bottom:1px solid var(--border);font-size:12.5px;color:var(--text2)">${esc(lineaVarianteFamilia(v))}</div>
+  `).join('');
+
+  openModal(`
+    <div class="modal-title">${EMOJI_FAMILIA[f.familia] || '🧺'} ${esc(f.familia)}</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Total vendido: <span style="font-weight:700;color:var(--accent)">${fmtCantidadFamilia(f)}</span></div>
+    ${filas || `<div class="empty-state" style="padding:12px 0"><p style="font-size:12px">Sin detalle</p></div>`}
+    <div class="modal-actions">
+      <button class="btn btn-ghost w-100" onclick="openModal(renderCierreSemanaModal())">‹ Volver</button>
+    </div>
+  `);
 }
 
 function compartirCierreSemanaWhatsApp() {
@@ -7870,6 +7870,17 @@ function renderReporteReparto() {
   const totalTodos = totalIngresos();
   const desgloseTotal = desgloseDe(totalTodos);
 
+  // Suma de todos los ingresos (m.tipo === 'income') de la fecha exacta
+  // elegida en el input de fecha. Se recalcula sobre state.movimientos
+  // completo (no sólo los últimos 50 de "ingresos") para que el total del
+  // día sea correcto aunque haya más de 50 ingresos en el historial.
+  const totalDia = !repartoFecha
+    ? 0
+    : state.movimientos
+        .filter(m => m.tipo === 'income' && m.fecha === repartoFecha)
+        .reduce((s, m) => s + m.monto, 0);
+  const desgloseDia = !repartoFecha ? '' : desgloseDe(totalDia);
+
   return `
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 12px;margin-top:12px;box-shadow:var(--shadow)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;gap:8px">
@@ -7900,12 +7911,32 @@ function renderReporteReparto() {
           ${desglose}
         `
       }
+
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin:14px 0 8px">O elegí un día puntual</div>
+      <input type="date" class="form-input" style="margin-bottom:${repartoFecha ? '12px' : '0'}" value="${repartoFecha}" onchange="setRepartoFecha(this.value)">
+      ${!repartoFecha
+        ? ''
+        : totalDia === 0
+          ? `<div style="font-size:11.5px;color:var(--text3);padding-bottom:6px">No hay ingresos registrados ese día</div>`
+          : `
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px">
+              <div style="font-size:12.5px;font-weight:700;color:var(--text)">Total del día</div>
+              <div style="font-size:14px;font-weight:700;color:var(--text)">${fmt(totalDia)}</div>
+            </div>
+            ${desgloseDia}
+          `
+      }
     </div>
   `;
 }
 
 function setRepartoMov(id) {
   repartoMovId = id === '' ? null : Number(id);
+  renderFinanzas();
+}
+
+function setRepartoFecha(fecha) {
+  repartoFecha = fecha || '';
   renderFinanzas();
 }
 
@@ -8956,31 +8987,6 @@ function renderStockComprometidoBanner() {
   </div>`;
 }
 
-function renderGastosFijosBanner() {
-  const pendientes = gastosFijosPorVencerOVencidos();
-  if (pendientes.length === 0) return '';
-  const vencidos = pendientes.filter(g => estadoPagoGastoFijo(g) === 'red');
-  const esVencido = vencidos.length > 0;
-  const color = esVencido ? 'var(--red)' : 'var(--yellow)';
-  const bg = esVencido ? 'var(--red-light)' : 'var(--yellow-light)';
-  const cant = esVencido ? vencidos.length : pendientes.length;
-  const texto = esVencido
-    ? `${cant} gasto${cant !== 1 ? 's' : ''} fijo${cant !== 1 ? 's' : ''} vencido${cant !== 1 ? 's' : ''}`
-    : `${cant} gasto${cant !== 1 ? 's' : ''} fijo${cant !== 1 ? 's' : ''} por vencer`;
-  return `<div class="card" style="background:${bg};border-color:${color};margin-bottom:12px">
-    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:20px">💸</span>
-        <div>
-          <div style="font-weight:600;font-size:13px;color:${color}">${texto}</div>
-          <div style="font-size:11px;color:var(--text2)">Gas, papelería u otros gastos recurrentes</div>
-        </div>
-      </div>
-      <button class="btn btn-primary btn-sm" style="background:${color}" onclick="navigateCostos('gastosfijos')">Ver gastos</button>
-    </div>
-  </div>`;
-}
-
 function renderBackupBanner() {
   const dias = diasSinBackup();
   const nunca = dias === null;
@@ -9086,7 +9092,6 @@ registrarSW().then(() => {
         registrarTokenFCM(); // refresca el token por si cambió
       }
       updateBellIcon();
-      chequearCartelGastosFijos();
     });
   });
 });

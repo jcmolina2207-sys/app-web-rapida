@@ -3791,7 +3791,7 @@ function openPedidoForm(id, datosImportados) {
       <label class="form-label">Seña / monto pagado ($)</label>
       <input class="form-input" id="f-monto-pagado" type="number" min="0" step="0.01" value="${p ? montoPagadoDe(p) : 0}">
       <label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:13px;cursor:pointer">
-        <input type="checkbox" id="f-pagado-completo" ${p && estaPagadoCompleto(p) ? 'checked' : ''} onchange="togglePagadoCompletoForm()">
+        <input type="checkbox" id="f-pagado-completo" ${(p && estaPagadoCompleto(p)) || (!p && datosImportados?.pagado === true) ? 'checked' : ''} onchange="togglePagadoCompletoForm()">
         Pedido pagado por completo
       </label>
       <div style="font-size:11px;color:var(--text3);margin-top:4px">Dejalo en 0 si todavía no pagó nada. Para sumar un pago más adelante, usá "Registrar pago" en el detalle del pedido.</div>
@@ -4044,6 +4044,12 @@ function openImportarPedidoModal() {
       <div style="font-size:11px;color:var(--text3);margin-top:4px">💡 Para mejor resultado, recortá la captura para que se vea solo el texto del mensaje (sin la hora del celular ni el encabezado del chat arriba).</div>
     </div>
     <div class="form-group">
+      <label class="form-label">🎙️ Dictar pedido por audio (opcional)</label>
+      <button type="button" class="btn btn-secondary w-100" id="btn-import-audio" onclick="toggleGrabacionPedidoAudio()">🎤 Grabar audio</button>
+      <div id="import-audio-status" style="font-size:12px;color:var(--accent);margin-top:6px;min-height:16px"></div>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Dictalo con una pausa entre cada dato: nombre del cliente, después el producto, y "pagado" al final si ya cobraste. Ej: <em>"Miguel Rosquetes" (pausa) "una docena de churros dulce de leche" (pausa) "pagado"</em>.</div>
+    </div>
+    <div class="form-group">
       <label class="form-label">📋 Texto del pedido</label>
       <textarea class="form-input" id="f-import-texto" style="min-height:160px" placeholder="Pegá acá el mensaje de WhatsApp, o esperá a que la foto se convierta en texto..."></textarea>
       <div style="font-size:11px;color:var(--text3);margin-top:4px">Funciona con un pedido de un cliente con varios productos, o con una lista tipo agenda con un pedido por renglón (incluso con varios días juntos, tipo "Sábado 9/8" / "Domingo 10/08").</div>
@@ -4094,12 +4100,122 @@ async function onImportImagenSeleccionada(event) {
   }
 }
 
+/* ------------------------------------------------------------
+   DICTADO POR VOZ del pedido — usa el reconocimiento de voz del
+   propio navegador (Web Speech API), sin subir el audio a ningún
+   servidor nuestro. Cada pausa al hablar se convierte en una línea
+   nueva del textarea, así el mismo parser de texto (armarPedidoDesdeBuffer)
+   puede leer "cliente" / "producto" / "pagado" como renglones separados,
+   igual que si se hubiera escrito a mano.
+------------------------------------------------------------ */
+let _reconocimientoPedidoAudio = null;
+let _grabandoPedidoAudio = false;
+
+function toggleGrabacionPedidoAudio() {
+  if (_grabandoPedidoAudio) detenerGrabacionPedidoAudio();
+  else iniciarGrabacionPedidoAudio();
+}
+
+function iniciarGrabacionPedidoAudio() {
+  const status = document.getElementById('import-audio-status');
+  const boton = document.getElementById('btn-import-audio');
+  const textarea = document.getElementById('f-import-texto');
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  if (!SR) {
+    if (status) status.textContent = '⚠️ Este navegador no permite dictar por voz (probá con Chrome en Android). Podés escribir o pegar el texto igual.';
+    return;
+  }
+
+  let textoPrevio = (textarea?.value || '').trim();
+  if (textoPrevio) textoPrevio += '\n';
+
+  let rec;
+  try {
+    rec = new SR();
+  } catch (e) {
+    if (status) status.textContent = '⚠️ No se pudo iniciar el dictado por voz en este navegador.';
+    return;
+  }
+  rec.lang = 'es-AR';
+  rec.continuous = true;
+  rec.interimResults = true;
+
+  rec.onresult = (event) => {
+    const ta = document.getElementById('f-import-texto');
+    if (!ta) return;
+    let textoFinal = '';
+    let textoParcial = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const transcripcion = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        textoFinal += transcripcion.trim() + '\n';
+      } else {
+        textoParcial += transcripcion;
+      }
+    }
+    if (textoFinal) textoPrevio += textoFinal;
+    ta.value = textoPrevio + textoParcial;
+  };
+
+  rec.onerror = (event) => {
+    if (status) {
+      status.textContent = '⚠️ ' + (event.error === 'not-allowed'
+        ? 'No se pudo acceder al micrófono (revisá los permisos del navegador).'
+        : 'Error escuchando el audio (' + event.error + ').');
+    }
+    detenerGrabacionPedidoAudio();
+  };
+
+  rec.onend = () => {
+    _grabandoPedidoAudio = false;
+    _reconocimientoPedidoAudio = null;
+    const b = document.getElementById('btn-import-audio');
+    if (b) { b.textContent = '🎤 Grabar audio'; b.classList.remove('btn-primary'); b.classList.add('btn-secondary'); }
+    const s = document.getElementById('import-audio-status');
+    if (s && s.textContent.indexOf('⚠️') === -1) {
+      s.textContent = '✅ Listo — revisá el texto (cliente, producto y "pagado" en renglones separados) y tocá "Analizar"';
+    }
+  };
+
+  try {
+    rec.start();
+  } catch (e) {
+    if (status) status.textContent = '⚠️ No se pudo iniciar el micrófono.';
+    return;
+  }
+  _reconocimientoPedidoAudio = rec;
+  _grabandoPedidoAudio = true;
+  if (boton) { boton.textContent = '⏹️ Detener grabación'; boton.classList.remove('btn-secondary'); boton.classList.add('btn-primary'); }
+  if (status) status.textContent = '🔴 Escuchando... hacé una pausa entre cada dato (cliente, producto, "pagado")';
+}
+
+function detenerGrabacionPedidoAudio() {
+  if (_reconocimientoPedidoAudio) {
+    try { _reconocimientoPedidoAudio.stop(); } catch (e) {}
+  }
+  _grabandoPedidoAudio = false;
+}
+
 // Palabras que, seguidas de un número (o precedidas por "Nx" / una fracción),
 // marcan que ahí empieza la descripción de un producto DENTRO de una línea que
 // también tiene el nombre del cliente antes (ej: "Miriam 126  1/2 docena rellena $4.000").
 // Requiere una unidad conocida (y no solo cualquier número) para no confundir
 // el número de casa/calle del cliente con una cantidad.
 const UNIDADES_PRODUCTO_REGEX = /(\d+\/\d+|\d+)\s*(?:[xX]\b|docenas?\b|doc\.?\b|kgs?\b|porci[oó]n(?:es)?\b|unidad(?:es)?\b|churros?\b|bizcochitos?\b|tortas?\b|alfajor(?:es)?\b)/i;
+
+// Al dictar por voz, las cantidades salen como palabras ("una docena", "media
+// docena") en vez de dígitos ("1 docena"), y el resto del parser (armado
+// pensando en texto escrito) espera dígitos para reconocer dónde arranca un
+// producto. Solo reemplaza la palabra cuando está pegada a una unidad conocida,
+// para no tocar nombres de clientes (ej. "Tres Marías" queda intacto).
+const NUMEROS_PALABRA_A_DIGITO = { 'un': '1', 'una': '1', 'dos': '2', 'tres': '3', 'cuatro': '4', 'media': '1/2', 'medio': '1/2' };
+function convertirNumerosDictadosADigitos(texto) {
+  return (texto || '').replace(
+    /\b(un|una|dos|tres|cuatro|media|medio)\b(?=\s*(?:docenas?\b|doc\.?\b|kgs?\b|kilos?\b|porci[oó]n(?:es)?\b|unidad(?:es)?\b|churros?\b|bizcochitos?\b|tortas?\b|alfajor(?:es)?\b))/gi,
+    (m) => NUMEROS_PALABRA_A_DIGITO[m.toLowerCase()] || m
+  );
+}
 // Una línea COMPLETA que empieza directamente con un número o una fracción
 // ("1 docena simple", "1/2 rellenos", "2x algo") es casi siempre la continuación
 // de un producto, no un nombre de cliente (los nombres/descriptores de cliente
@@ -4110,6 +4226,17 @@ const PRECIO_REGEX = /\$\s?([\d.,]+)|(?:^|\s)(\d{1,3}(?:\.\d{3})+)\s*$/;
 
 const DIAS_SEMANA = ['domingo', 'lunes', 'martes', 'mi[ée]rcoles', 'jueves', 'viernes', 's[áa]bado'];
 const ENCABEZADO_DIA_REGEX = new RegExp(`^(?:${DIAS_SEMANA.join('|')})\\b\\s*(\\d{1,2})?\\s*\\/?\\s*(\\d{1,2})?\\.?$`, 'i');
+
+// Renglón que dice SOLO el estado de pago (típico al dictar por audio, ej:
+// "pagado" como último dato del pedido) — se saca de la lista de productos y
+// se usa para marcar el pedido como pagado por completo automáticamente.
+// Devuelve true / false / null (null = la línea no habla de estado de pago).
+function detectarEstadoPagoLinea(linea) {
+  const l = normalizarTexto((linea || '').trim());
+  if (/^(pagad[oa]|ya\s*pag[oó]|abonad[oa]|pago\s*completo|listo\s*el\s*pago)$/.test(l)) return true;
+  if (/^(sin\s*pagar|no\s*pag[oó]|debe|a\s*pagar|pendiente\s*de\s*pago|todavia\s*no\s*pag[oó])$/.test(l)) return false;
+  return null;
+}
 
 // Ruido típico de la UI de WhatsApp/el celular que puede colarse al copiar o al hacer OCR.
 function esRuidoWhatsApp(linea) {
@@ -4146,8 +4273,23 @@ function splitSeccionesPedido(texto) {
 // Arma un pedido a partir de las líneas acumuladas hasta encontrar un precio.
 // Devuelve { cliente, notaCliente, telefono, items, totalDetectado }
 function armarPedidoDesdeBuffer(lineasBuffer, precioCierre) {
-  const lineas = lineasBuffer.filter(Boolean);
-  if (lineas.length === 0) return null;
+  // Un renglón que solo dice el estado de pago ("pagado", típico al dictar por
+  // audio) se separa del resto ANTES de armar cliente/productos, para que no
+  // termine cargado como si fuera un producto más.
+  let pagadoDetectado = null;
+  const lineas = lineasBuffer.filter(Boolean).filter(l => {
+    const marca = detectarEstadoPagoLinea(l);
+    if (marca === null) return true;
+    pagadoDetectado = marca;
+    return false;
+  });
+  if (lineas.length === 0) {
+    // No quedó nada más que el estado de pago (ej: un renglón dictado que solo
+    // decía "pagado") — devolvemos un pedido "marcador" para que se pueda
+    // fusionar con el pedido anterior en vez de perder el dato.
+    if (pagadoDetectado === null) return null;
+    return { cliente: '', notaCliente: '', telefono: '', items: [], totalDetectado: null, pagado: pagadoDetectado };
+  }
 
   let cliente = '';
   let notaCliente = '';
@@ -4209,7 +4351,7 @@ function armarPedidoDesdeBuffer(lineasBuffer, precioCierre) {
     items[0].subtotal = precioCierre * items[0].cantidad;
   }
 
-  return { cliente: cliente.trim(), notaCliente, telefono, items, totalDetectado: precioCierre || null };
+  return { cliente: cliente.trim(), notaCliente, telefono, items, totalDetectado: precioCierre || null, pagado: pagadoDetectado };
 }
 
 // Recorre las líneas de UNA sección y devuelve varios pedidos: uno por cada
@@ -4233,11 +4375,15 @@ function extraerPedidosDeSeccion(seccionTexto) {
 
     if (!pedido.cliente && pedidos.length > 0) {
       // Renglón(es) sin nombre → son productos extra del pedido anterior
+      // (o, si viene sin items, solo el estado de pago dictado por separado).
       const anterior = pedidos[pedidos.length - 1];
-      anterior.items.push(...pedido.items);
-      anterior.totalDetectado = (anterior.totalDetectado || 0) + (pedido.totalDetectado || 0);
-      // Con más de un producto ya no podemos confiar en repartir el precio automáticamente
-      anterior.items.forEach(it => { it.precioUnit = 0; it.subtotal = 0; });
+      if (pedido.items.length > 0) {
+        anterior.items.push(...pedido.items);
+        anterior.totalDetectado = (anterior.totalDetectado || 0) + (pedido.totalDetectado || 0);
+        // Con más de un producto ya no podemos confiar en repartir el precio automáticamente
+        anterior.items.forEach(it => { it.precioUnit = 0; it.subtotal = 0; });
+      }
+      if (pedido.pagado !== null && pedido.pagado !== undefined) anterior.pagado = pedido.pagado;
     } else if (pedido.cliente) {
       pedidos.push(pedido);
     }
@@ -4390,8 +4536,9 @@ function construirNotaImportacion(bloque) {
 }
 
 function analizarTextoImportado() {
-  const texto = document.getElementById('f-import-texto')?.value || '';
-  if (!texto.trim()) { showToast('⚠️ Pegá el texto o subí la foto del pedido primero'); return; }
+  let texto = document.getElementById('f-import-texto')?.value || '';
+  if (!texto.trim()) { showToast('⚠️ Pegá el texto, subí la foto o dictá el pedido primero'); return; }
+  texto = convertirNumerosDictadosADigitos(texto);
 
   const secciones = splitSeccionesPedido(texto);
   let pedidos = [];

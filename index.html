@@ -3030,6 +3030,7 @@ function claveDuplicadoPedido(p) {
   return [
     normalizarTexto((p.cliente || '').trim()),
     p.fechaEntrega || '',
+    p.hora || '',
     normalizarTexto((p.producto || '').trim()),
     Math.round(p.precio || 0),
   ].join('|');

@@ -266,6 +266,7 @@
   .badge-paid    { background: var(--green-light);  color: var(--green); }
   .badge-unpaid  { background: var(--red-light);    color: var(--red); }
   .badge-partial { background: var(--yellow-light); color: var(--yellow); }
+  .badge-frecuente { background: var(--yellow-light); color: var(--yellow); }
   .badge-atrasado {
     background: var(--red); color: #fff;
     animation: pulseAtrasado 1.6s ease-in-out infinite;
@@ -1374,6 +1375,10 @@ const authReadyPromise = new Promise((resolve) => {
 const FCM_VAPID_KEY = "BE3yHu_rwAlrxLoTXdfakYsnta_-0-GckQCSQzb9WjslhAT4BBVkVx-WwYLQPlmlNgYZZjcZJ1bjyQCq_Ww0akg";
 const messaging = firebase.messaging.isSupported() ? firebase.messaging() : null;
 
+// ---- Versión de la app (para detectar actualizaciones) ----
+// Al publicar un cambio: subir este número Y el de version.json, IGUALES.
+const APP_VERSION = '2026.09.07.1';
+
 /* ============================================================
    ESTADO GLOBAL + SINCRONIZACIÓN FIREBASE
 ============================================================ */
@@ -1385,6 +1390,7 @@ let state = {
   recetas: [],
   catalogo: [],   // productos personalizados agregados por Sofi
   clientes: [],   // datos editables por cliente: { key, nombre, telefono, direccion, nota }
+  historialPrecios: [], // log de cambios de precio: { id, producto, precioAnterior, precioNuevo, fecha }
   config: {
     valorHora: 7200,          // convenio Ayudante Pastelero ($1.444.937 / 200hs), ajustable
     costoGasPorMinuto: 13.33, // $/min de horno, manual (ver seedDatosSofia para el valor inicial)
@@ -1404,8 +1410,31 @@ let state = {
 
 let _nextIdFromDB = 1;
 
+// Sufijo numérico (0-999) único por dispositivo/navegador, persistido en
+// localStorage. Se genera una sola vez y se reutiliza siempre. Se usa en
+// nextId() para que dos dispositivos nunca generen el mismo id sin
+// depender de que se sincronice un contador compartido por la red (ver
+// nextId() más abajo).
+function getOrCreateDeviceSuffix() {
+  const KEY = 'deviceSuffix';
+  try {
+    let v = localStorage.getItem(KEY);
+    if (v === null || v === undefined || v === '' || isNaN(parseInt(v, 10))) {
+      v = String(Math.floor(Math.random() * 1000));
+      localStorage.setItem(KEY, v);
+    }
+    return parseInt(v, 10);
+  } catch (e) {
+    // Si localStorage no está disponible, usar un valor random en memoria
+    // (peor caso: dos recargas seguidas podrían tener suffix distinto, pero
+    // sigue sin haber colisión entre dispositivos en el mismo milisegundo).
+    return Math.floor(Math.random() * 1000);
+  }
+}
+const deviceSuffix = getOrCreateDeviceSuffix();
+
 // Colecciones que se sincronizan documento-por-documento (subcolecciones reales)
-const SYNCED_COLLECTIONS = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','clientes'];
+const SYNCED_COLLECTIONS = ['pedidos','ingredientes','movimientos','notas','recetas','catalogo','clientes','historialPrecios'];
 
 // Sync status UI
 function setSyncStatus(status) {
@@ -1468,6 +1497,24 @@ async function persistItem(colName, item, customDocId) {
   }
   // Respaldo local siempre, incluso si Firestore falló
   localStorage.setItem('toque_artesano_v3', JSON.stringify(state));
+}
+
+// Agrega una entrada al historial de precios de un producto del catálogo
+// (state.historialPrecios), solo si el precio realmente cambió. Se usa desde
+// savePrecioProductoBase() y saveProductoCatalogo(). Id determinístico
+// (timestamp + nombre normalizado) para evitar colisiones entre dispositivos.
+function registrarHistorialPrecio(producto, precioAnterior, precioNuevo) {
+  if (precioAnterior === precioNuevo) return; // sin cambio real, no loguear
+  const entry = {
+    id: `${Date.now()}_${encodeURIComponent(String(producto).trim().toLowerCase()).slice(0, 60)}`,
+    producto,
+    precioAnterior: precioAnterior ?? null,
+    precioNuevo: precioNuevo ?? null,
+    fecha: Date.now(),
+  };
+  state.historialPrecios = state.historialPrecios || [];
+  state.historialPrecios.push(entry);
+  persistItem('historialPrecios', entry);
 }
 
 // Registra que un documento fue borrado A PROPÓSITO. Esto es lo que le
@@ -1597,7 +1644,19 @@ function persistIngredientesPorIds(ids) {
   });
 }
 
-function nextId() { return ++state.nextId; }
+// Ya no es un contador compartido (++state.nextId): dependía de que
+// app/meta se sincronizara entre dispositivos ANTES de que ambos crearan
+// algo, y si dos dispositivos creaban una entidad casi al mismo tiempo,
+// los dos calculaban el mismo id → persistItem() (que usa String(id) como
+// docId) hacía que el segundo pisara al primero → "pedidos perdidos".
+// Ahora el id se arma con el timestamp actual (ms) + el sufijo fijo del
+// dispositivo, así la unicidad no depende de ninguna sincronización de
+// red. Sigue siendo un number entero seguro: 13 dígitos de Date.now() * 1000
+// + hasta 3 dígitos de deviceSuffix = 16 dígitos, bien por debajo de
+// Number.MAX_SAFE_INTEGER (16 dígitos). state.nextId / meta/nextId quedan
+// solo como piso de seguridad heredado (ver loadFromFirebase), ya no son
+// la fuente de unicidad.
+function nextId() { return Date.now() * 1000 + deviceSuffix; }
 
 // Parsear precio formato argentino: 17.600 → 17600, 17,5 → 17.5
 function parsePrecio(val) {
@@ -1764,6 +1823,7 @@ async function loadFromFirebase() {
     reconciliarMovimientosDesdeEntregados();
     setSyncStatus('ok');
     renderScreen(activeScreen);
+    backupAutomaticoSilencioso(); // fire-and-forget, no bloquea el render
   })();
 
   const timeoutPromise = new Promise((_, reject) =>
@@ -2076,6 +2136,60 @@ function abrirBackupModal() {
       <button class="btn btn-ghost btn-sm" onclick="importarDatos()">⬆️ Importar datos</button>
     </div>
   `);
+}
+
+/* ============================================================
+   BACKUP AUTOMÁTICO SILENCIOSO (a Firestore)
+============================================================ */
+// Corre solo (sin acción del usuario ni UI) una vez por día por
+// dispositivo, después de que la carga inicial desde Firebase haya
+// terminado bien. Guarda una foto completa del estado en la colección
+// 'backupsAuto', con el id = la fecha (YYYY-MM-DD): si los dos
+// dispositivos lo disparan el mismo día no se duplica, el segundo
+// sobreescribe el mismo doc. Mantiene solo los últimos 7 backups
+// automáticos para no acumular basura en Firestore. No afecta en nada
+// al backup manual (exportarDatos()/importarDatos()), que sigue igual.
+async function backupAutomaticoSilencioso() {
+  try {
+    const hoy = todayStr();
+    if (localStorage.getItem('toque_ultimo_backup_auto') === hoy) return;
+
+    const snapshot = {
+      pedidos: state.pedidos,
+      ingredientes: state.ingredientes,
+      movimientos: state.movimientos,
+      notas: state.notas,
+      recetas: state.recetas,
+      catalogo: state.catalogo,
+      clientes: state.clientes,
+      historialPrecios: state.historialPrecios,
+      config: state.config,
+      nextId: state.nextId,
+      tombstones: state.tombstones,
+      _fecha: hoy,
+      _generadoEl: Date.now(),
+    };
+
+    await db.collection('backupsAuto').doc(hoy).set(snapshot);
+    localStorage.setItem('toque_ultimo_backup_auto', hoy);
+
+    limpiarBackupsAutoViejos();
+  } catch (e) {
+    console.warn('[Backup automático] no se pudo generar:', e.message);
+  }
+}
+
+// Deja solo los últimos 7 backups automáticos. Los ids son fechas
+// YYYY-MM-DD, que ordenan bien alfabéticamente igual que cronológicamente.
+async function limpiarBackupsAutoViejos() {
+  try {
+    const snap = await db.collection('backupsAuto').get();
+    const ids = snap.docs.map(d => d.id).sort();
+    const sobrantes = ids.slice(0, Math.max(0, ids.length - 7));
+    await Promise.all(sobrantes.map(id => db.collection('backupsAuto').doc(id).delete()));
+  } catch (e) {
+    console.warn('[Backup automático] no se pudo limpiar backups viejos:', e.message);
+  }
 }
 
 function exportarDatos() {
@@ -2467,6 +2581,7 @@ function renderInicio() {
     ${renderNotifBanner()}
     ${renderAtrasadosBanner()}
     ${renderStockComprometidoBanner()}
+    ${renderVelocidadConsumoBanner()}
     ${renderBackupBanner()}
 
     <div class="dash-top-grid">
@@ -3533,6 +3648,27 @@ function renderCatalogoLista() {
   el.innerHTML = html || '<div class="empty-state"><p>Sin productos</p></div>';
 }
 
+// Arma el HTML plegable "Ver historial de precios" para un producto del
+// catálogo. Si no hay entradas, no muestra nada.
+function renderHistorialPrecioHTML(producto) {
+  const entradas = (state.historialPrecios || [])
+    .filter(h => h.producto === producto)
+    .sort((a, b) => b.fecha - a.fecha);
+  if (!entradas.length) return '';
+
+  const filas = entradas.map(h => `
+    <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
+      <span style="color:var(--text3)">${new Date(h.fecha).toLocaleDateString('es-AR')}</span>
+      <span>${h.precioAnterior !== null ? '$' + Number(h.precioAnterior).toLocaleString('es-AR') : '—'} → <b>${h.precioNuevo !== null ? '$' + Number(h.precioNuevo).toLocaleString('es-AR') : '—'}</b></span>
+    </div>`).join('');
+
+  return `
+    <details style="margin-bottom:14px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--accent);font-weight:600">📈 Ver historial de precios (${entradas.length})</summary>
+      <div style="margin-top:8px">${filas}</div>
+    </details>`;
+}
+
 function openProductoForm(nombreExistente) {
   const p = nombreExistente
     ? (state.catalogo || []).find(x => x.nombre === nombreExistente)
@@ -3563,6 +3699,7 @@ function openProductoForm(nombreExistente) {
       <label class="form-label">Categoría</label>
       <select class="form-input" id="f-prod-cat">${catsOpts}</select>
     </div>
+    ${nombreExistente ? renderHistorialPrecioHTML(nombreExistente) : ''}
     <div class="modal-actions">
       <button class="btn btn-ghost w-100" onclick="openCatalogo()">← Volver</button>
       <button class="btn btn-primary w-100" onclick="saveProductoCatalogo('${nombreExistente || ''}')">💾 Guardar</button>
@@ -3598,6 +3735,7 @@ function openProductoFormEditar(nombre, precioActual, cat, precioPorcionActual) 
     <div style="font-size:11px;color:var(--text3);margin-bottom:14px;padding:8px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
       💡 Estos precios se usan al crear pedidos, según elijas "entera" o "por porción".
     </div>
+    ${renderHistorialPrecioHTML(nombre)}
     <div class="modal-actions">
       <button class="btn btn-ghost w-100" onclick="openCatalogo()">← Volver</button>
       <button class="btn btn-primary w-100" onclick="savePrecioProductoBase('${nombre.replace(/'/g,"\\'")}', '${cat.replace(/'/g,"\\'")}')">💾 Guardar precio</button>
@@ -3611,6 +3749,9 @@ async function savePrecioProductoBase(nombre, cat) {
 
   const precioPorcionEl = document.getElementById('f-prod-precio-porcion');
   const precioPorcion = precioPorcionEl ? (parsePrecio(precioPorcionEl.value) || null) : null;
+
+  // Precio vigente antes de este guardado (base o override), para el historial
+  const precioAnterior = getCatalogo().find(p => p.nombre === nombre)?.precio ?? null;
 
   state.catalogo = state.catalogo || [];
   // Buscar si ya existe un override para este producto
@@ -3626,6 +3767,7 @@ async function savePrecioProductoBase(nombre, cat) {
     state.catalogo.push(itemGuardado);
   }
 
+  registrarHistorialPrecio(nombre, precioAnterior, precio);
   await persistItem('catalogo', itemGuardado, catalogoDocId(nombre));
   saveState();
   showToast(`✅ Precio de "${nombre}" actualizado a $${precio.toLocaleString('es-AR')}${precioPorcion ? ' · porción $' + precioPorcion.toLocaleString('es-AR') : ''}`);
@@ -3649,8 +3791,11 @@ async function saveProductoCatalogo(nombreAnterior) {
     // Editar existente
     const idx = state.catalogo.findIndex(x => x.nombre === nombreAnterior);
     if (idx >= 0) {
+      // Precio vigente antes de este guardado, para el historial
+      const precioAnterior = getCatalogo().find(p => p.nombre === nombreAnterior)?.precio ?? null;
       itemGuardado = { nombre, precio: precio || null, precioPorcion, cat, custom: true };
       state.catalogo[idx] = itemGuardado;
+      registrarHistorialPrecio(nombre, precioAnterior, precio || null);
       // Si cambió el nombre, el id de documento cambia: borrar el doc viejo
       if (nombreAnterior !== nombre) {
         await removeItem('catalogo', null, catalogoDocId(nombreAnterior));
@@ -6136,6 +6281,17 @@ function descontarMateriaPrimaByPedido(items) {
       ing.stock = Math.max(0, Math.round((ing.stock - cantDescontar) * 1000) / 1000);
       detalle.push({ ingId: ing.id, cantidad: cantRealDescontada });
       descuentos.push(`${ing.nombre}: -${cantDescontar} ${ing.unidad}`);
+      // Log liviano de consumo real (para proyectar "días hasta quiebre" por
+      // velocidad histórica — ver calcularVelocidadConsumo). No duplica ni
+      // reemplaza la resta de stock de arriba, solo la registra. Techo de
+      // 60 registros para no crecer sin límite en Firestore.
+      if (cantRealDescontada > 0) {
+        if (!Array.isArray(ing.historialConsumo)) ing.historialConsumo = [];
+        ing.historialConsumo.push({ fecha: todayStr(), cantidad: cantRealDescontada });
+        if (ing.historialConsumo.length > 60) {
+          ing.historialConsumo.splice(0, ing.historialConsumo.length - 60);
+        }
+      }
     });
   });
   descuentos.detalle = detalle;
@@ -6159,6 +6315,47 @@ function revertirMateriaPrimaByPedido(detalle) {
     reversiones.push(`${ing.nombre}: +${cantidad} ${ing.unidad}`);
   });
   return reversiones;
+}
+
+/* ============================================================
+   PROYECCIÓN DE QUIEBRE DE STOCK POR CONSUMO REAL
+   Señal adicional (y distinta) a calcularStockComprometido(): en vez de
+   mirar solo los pedidos ya agendados, mira el ritmo histórico real al que
+   se viene gastando cada ingrediente (ing.historialConsumo, logueado en
+   descontarMateriaPrimaByPedido) y proyecta en cuántos días llegaría a 0
+   si ese ritmo se mantiene. Útil para producción libre / mermas que no
+   quedan reflejadas como pedido agendado.
+============================================================ */
+
+// Consumo promedio semanal de un ingrediente en base a su historial de los
+// últimos 30 días. Devuelve null si no hay suficiente historial todavía
+// (ingrediente nuevo o casi sin uso) para no mostrar proyecciones basura.
+function calcularVelocidadConsumo(ingId) {
+  const ing = state.ingredientes.find(i => i.id === ingId);
+  if (!ing || !Array.isArray(ing.historialConsumo) || ing.historialConsumo.length === 0) return null;
+
+  const hoy = todayStr();
+  const desde = addDiasStr(hoy, -30);
+  const registros = ing.historialConsumo.filter(r => r.fecha >= desde && r.fecha <= hoy);
+  // Con muy pocos registros el "ritmo" no es representativo (ej. un único
+  // descuento aislado hace 2 semanas no dice nada sobre velocidad real).
+  if (registros.length < 3) return null;
+
+  const total = registros.reduce((acc, r) => acc + (Number(r.cantidad) || 0), 0);
+  const fechaMasVieja = registros.reduce((min, r) => (r.fecha < min ? r.fecha : min), registros[0].fecha);
+  const diasCubiertos = Math.max(1, -diffDiasDesdeHoy(fechaMasVieja) + 1);
+  const promedioDiario = total / diasCubiertos;
+  return promedioDiario * 7; // consumo promedio por semana
+}
+
+// Días hasta que el stock actual llegue a 0 si se mantiene el ritmo de
+// consumo reciente. Devuelve null si no hay velocidad calculable (ver
+// calcularVelocidadConsumo) o si el consumo es 0 (no se está gastando).
+function diasHastaQuiebre(ing) {
+  const velocidadSemanal = calcularVelocidadConsumo(ing.id);
+  if (velocidadSemanal === null || velocidadSemanal <= 0) return null;
+  const dias = ing.stock / (velocidadSemanal / 7);
+  return Math.max(0, Math.round(dias));
 }
 
 /* ============================================================
@@ -8774,6 +8971,17 @@ function getClientes() {
     mapa[info.key].direccion = info.direccion || '';
     mapa[info.key].nota = info.nota || '';
   });
+  // Cliente frecuente: 3 o más pedidos ENTREGADOS con fecha de entrega
+  // dentro de los últimos 60 días (no cuenta pedidos pendientes/en
+  // preparación, ni entregas más viejas que eso). Puramente informativo,
+  // no afecta orden ni cálculos de deuda/gastado.
+  Object.values(mapa).forEach(c => {
+    const entregadosRecientes = c.pedidos.filter(p =>
+      p.estado === 'done' && diffDiasDesdeHoy(p.fechaEntrega) >= -60
+    ).length;
+    c.esFrecuente = entregadosRecientes >= 3;
+  });
+
   // Prioridad: primero quienes más deben, luego por total gastado
   return Object.values(mapa).sort((a, b) => b.totalAdeudado - a.totalAdeudado || b.totalGastado - a.totalGastado);
 }
@@ -8823,7 +9031,10 @@ function clienteCard(c) {
         <div class="cliente-card-name">👤 ${esc(c.nombre)}</div>
         <div style="font-weight:700;color:var(--accent)">${fmt(c.totalGastado)}</div>
       </div>
-      ${debe ? `<div style="margin:4px 0"><span class="badge badge-unpaid">Debe ${fmt(c.totalAdeudado)}</span></div>` : ''}
+      ${(debe || c.esFrecuente) ? `<div style="margin:4px 0;display:flex;gap:6px;flex-wrap:wrap">
+        ${debe ? `<span class="badge badge-unpaid">Debe ${fmt(c.totalAdeudado)}</span>` : ''}
+        ${c.esFrecuente ? `<span class="badge badge-frecuente">⭐ Frecuente</span>` : ''}
+      </div>` : ''}
       <div class="cliente-card-stats">
         <span class="cliente-stat">📦 ${cantPedidos} pedido${cantPedidos !== 1 ? 's' : ''}</span>
         <span class="cliente-stat">✅ ${entregados} entregado${entregados !== 1 ? 's' : ''}</span>
@@ -8839,7 +9050,10 @@ function openClienteDetalle(key) {
   const pedidosOrdenados = [...c.pedidos].sort((a, b) => b.fechaEntrega.localeCompare(a.fechaEntrega));
   openModal(`
     <div class="flex gap-8 mb-12" style="align-items:center;justify-content:space-between">
-      <div class="modal-title" style="margin-bottom:0">👤 ${esc(c.nombre)}</div>
+      <div class="modal-title" style="margin-bottom:0;display:flex;align-items:center;gap:8px">
+        👤 ${esc(c.nombre)}
+        ${c.esFrecuente ? `<span class="badge badge-frecuente">⭐ Frecuente</span>` : ''}
+      </div>
       <button class="btn btn-secondary btn-sm" onclick="openClienteEditar('${c.key.replace(/'/g,"\'")}')">✏️ Editar</button>
     </div>
     <div class="summary-grid" style="margin-bottom:16px">
@@ -9135,6 +9349,47 @@ function renderStockComprometidoBanner() {
   </div>`;
 }
 
+// Card de alerta en Inicio: ingredientes que, al ritmo real de consumo de
+// los últimos 30 días (ver calcularVelocidadConsumo/diasHastaQuiebre), se
+// agotarían en pocos días — aunque no tengan pedidos agendados que los
+// comprometan (ej. producción libre, mermas). Complementa a
+// renderStockComprometidoBanner() sin duplicarlo: si un ingrediente ya
+// aparece ahí, no se repite acá (se prioriza un solo mensaje por ingrediente).
+function renderVelocidadConsumoBanner() {
+  const yaAlertados = new Set(calcularStockComprometido().map(f => f.ingId));
+  const DIAS_ALERTA = 5;
+
+  const alertas = [];
+  (state.ingredientes || []).forEach(ing => {
+    if (yaAlertados.has(ing.id)) return;
+    const dias = diasHastaQuiebre(ing);
+    if (dias !== null && dias <= DIAS_ALERTA) alertas.push({ ing, dias });
+  });
+  if (alertas.length === 0) return '';
+  alertas.sort((a, b) => a.dias - b.dias);
+
+  const MAX_MOSTRADOS = 3;
+  const items = alertas.slice(0, MAX_MOSTRADOS)
+    .map(a => `<div style="font-size:12px;color:var(--text2);margin-top:2px">• <b>${esc(a.ing.nombre)}</b> se agota en ~${a.dias} día${a.dias !== 1 ? 's' : ''} al ritmo actual</div>`)
+    .join('');
+  const resto = alertas.length - MAX_MOSTRADOS;
+  const restoTxt = resto > 0 ? `<div style="font-size:12px;color:var(--text2);margin-top:2px">y ${resto} más...</div>` : '';
+
+  return `<div class="card" style="background:var(--yellow-light);border-color:var(--yellow);margin-bottom:12px">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div style="display:flex;align-items:flex-start;gap:8px">
+        <span style="font-size:20px">⏳</span>
+        <div>
+          <div style="font-weight:600;font-size:13px;color:var(--yellow)">Se agotan al ritmo de consumo actual</div>
+          ${items}
+          ${restoTxt}
+        </div>
+      </div>
+      <button class="btn btn-primary btn-sm" style="background:var(--yellow)" onclick="navigateCostos('ingredientes')">Ver stock</button>
+    </div>
+  </div>`;
+}
+
 function renderBackupBanner() {
   const dias = diasSinBackup();
   const nunca = dias === null;
@@ -9218,6 +9473,72 @@ async function registrarSW() {
   }
 }
 
+/* ============================================================
+   CHEQUEO DE VERSIÓN — cartel "Hay una versión nueva disponible"
+============================================================ */
+let updateBannerMostrado = false;
+
+async function chequearVersion() {
+  if (updateBannerMostrado) return;
+  try {
+    const res = await fetch('./version.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && data.version && data.version !== APP_VERSION) {
+      mostrarBannerActualizacion();
+    }
+  } catch(e) {
+    console.warn('[App] No se pudo chequear version.json:', e);
+  }
+}
+
+function iniciarChequeoVersion() {
+  chequearVersion(); // al arrancar
+  setInterval(chequearVersion, 5 * 60 * 1000); // cada 5 minutos
+  // Si el usuario vuelve a la pestaña/app después de un rato, chequear también
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') chequearVersion();
+  });
+}
+
+function mostrarBannerActualizacion() {
+  if (updateBannerMostrado || document.getElementById('update-banner')) return;
+  updateBannerMostrado = true;
+  const div = document.createElement('div');
+  div.id = 'update-banner';
+  div.style.cssText = 'position:fixed;left:12px;right:12px;bottom:12px;z-index:9999;background:var(--yellow-light);border:1px solid var(--yellow);border-radius:var(--radius-sm);box-shadow:var(--shadow);padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap';
+  div.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px">
+      <span style="font-size:20px">🔄</span>
+      <div style="font-weight:600;font-size:13px;color:var(--yellow)">Hay una versión nueva disponible</div>
+    </div>
+    <button class="btn btn-primary btn-sm" style="background:var(--yellow)" onclick="actualizarApp()">Actualizar</button>
+  `;
+  document.body.appendChild(div);
+}
+
+async function actualizarApp() {
+  const btn = document.querySelector('#update-banner button');
+  if (btn) { btn.disabled = true; btn.textContent = 'Actualizando...'; }
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) {
+        if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+        await reg.update();
+      }
+    }
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    }
+  } catch(e) {
+    console.warn('[App] Error al actualizar:', e);
+  } finally {
+    location.reload();
+  }
+}
+
 function testNotifSW() {
   if (navigator.serviceWorker.controller) {
     navigator.serviceWorker.controller.postMessage({ type: 'TEST_NOTIFICATION' });
@@ -9229,6 +9550,7 @@ window.testNotif = testNotifSW;
 
 updateHeaderDate();
 if (window.lucide) lucide.createIcons();
+iniciarChequeoVersion();
 registrarSW().then(() => {
   // Esperamos a tener sesión anónima ANTES de leer/escribir Firestore,
   // porque con las reglas nuevas (request.auth != null) cualquier

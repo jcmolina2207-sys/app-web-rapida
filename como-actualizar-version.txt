@@ -1,0 +1,39 @@
+CÓMO PUBLICAR UNA ACTUALIZACIÓN — Toque Artesano de Sofi
+===========================================================
+
+Cada vez que cambie algo en la app y lo suba a GitHub, antes de
+hacer el push tengo que cambiar el número de versión en DOS lugares.
+Los dos números tienen que quedar IGUALES entre sí.
+
+PASO 1
+------
+Abrir el archivo "version.json"
+Cambiar el número que está después de "version":
+(ejemplo: de "2026.08.30.1" pasarlo a "2026.08.30.2")
+
+PASO 2
+------
+Abrir el archivo "index.html"
+Buscar (Ctrl+F / Cmd+F) el texto: APP_VERSION
+Va a aparecer una línea así:
+const APP_VERSION = '2026.08.30.1';
+Cambiar el número por el MISMO que puse en el paso 1
+(ejemplo: const APP_VERSION = '2026.08.30.2';)
+
+PASO 3
+------
+Guardar los dos archivos y subir todo a GitHub como siempre
+(git add, git commit, git push — o el método que use normalmente)
+
+LISTO
+-----
+En unos minutos, al abrir la app en el celular va a aparecer
+un cartel abajo que dice "Hay una versión nueva disponible"
+con un botón "Actualizar". Con tocar ese botón se actualiza sola,
+no hace falta borrar caché a mano.
+
+TIP: usar como número de versión la fecha del día + un número
+de orden si hago varios cambios ese mismo día.
+Ejemplo: 2026.08.30.1 → primer cambio del 30/08
+         2026.08.30.2 → segundo cambio ese mismo día
+         2026.08.31.1 → primer cambio del día siguiente

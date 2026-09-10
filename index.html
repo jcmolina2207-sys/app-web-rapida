@@ -1052,6 +1052,10 @@
         <div class="app-header-title" id="header-screen-title">Inicio</div>
       </div>
       <div style="display:flex;align-items:center;gap:12px">
+        <button id="search-btn" onclick="abrirBusquedaGlobal()" title="Buscar"
+          class="header-icon-btn">
+          <i data-lucide="search"></i>
+        </button>
         <button id="settings-btn" onclick="abrirBackupModal()" title="Configuración y backup"
           class="header-icon-btn">
           <i data-lucide="settings"></i>
@@ -1377,7 +1381,7 @@ const messaging = firebase.messaging.isSupported() ? firebase.messaging() : null
 
 // ---- Versión de la app (para detectar actualizaciones) ----
 // Al publicar un cambio: subir este número Y el de version.json, IGUALES.
-const APP_VERSION = '2026.09.07.1';
+const APP_VERSION = '2026.09.10.1';
 
 /* ============================================================
    ESTADO GLOBAL + SINCRONIZACIÓN FIREBASE
@@ -2493,6 +2497,39 @@ function pedidosPendientesCount() {
   return state.pedidos.filter(p => p.estado !== 'done').length;
 }
 
+// Pedidos con entrega hoy que todavía no fueron marcados como entregados,
+// ordenados por hora. Se usa en la tarjeta "Entregas de hoy" de Inicio.
+function entregasDeHoy() {
+  const hoy = todayStr();
+  return state.pedidos
+    .filter(p => p.estado !== 'done' && p.fechaEntrega === hoy)
+    .sort((a, b) => (a.hora || '').localeCompare(b.hora || ''));
+}
+
+function renderEntregasHoyCard() {
+  const entregas = entregasDeHoy();
+  if (!entregas.length) return '';
+  return `
+    <div class="card anim-in" style="animation-delay:.15s">
+      <div class="card-header">
+        <div class="card-title"><span class="card-icon"><i data-lucide="calendar-clock"></i></span> Entregas de hoy</div>
+        <span class="badge badge-pending">${entregas.length}</span>
+      </div>
+      <div class="activity-list">
+        ${entregas.map(p => `
+          <div class="activity-item" style="cursor:pointer" onclick="openPedidoDetalle(${p.id})">
+            <span class="activity-icon act-icon-act-orange"><i data-lucide="clock"></i></span>
+            <div class="activity-body">
+              <div class="activity-title">${esc(p.cliente)}</div>
+              <div class="activity-sub">${esc(p.producto)} · ${fmt(p.precio)}</div>
+            </div>
+            <div class="activity-date">${esc(p.hora || '')}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>`;
+}
+
 // "Actividad reciente": mezcla movimientos (ventas/compras, incluyendo el
 // ingreso automático que se genera al entregar un pedido) y notas, usando
 // SOLO datos reales que ya existen en el sistema (nada inventado). Se ordena
@@ -2551,6 +2588,128 @@ function fmtActividadFecha(item) {
   return diaTxt;
 }
 
+// Últimos pedidos ENTREGADOS, para la tarjeta "Actividad reciente" de
+// Inicio. A diferencia de actividadReciente() (que mezcla movimientos y
+// notas), acá solo se listan pedidos con estado 'done'.
+function pedidosEntregadosRecientes(limit = 6) {
+  return state.pedidos
+    .filter(p => p.estado === 'done')
+    .sort((a, b) => {
+      const ta = a._ts || new Date((a.fechaEntrega || '') + 'T00:00:00').getTime();
+      const tb = b._ts || new Date((b.fechaEntrega || '') + 'T00:00:00').getTime();
+      return tb - ta;
+    })
+    .slice(0, limit);
+}
+
+function verEntregadosDesdeInicio() {
+  setPedidoFiltroEstado('done');
+  navigate('pedidos');
+}
+
+/* ============================================================
+   BÚSQUEDA GLOBAL — pedidos, stock, notas y clientes
+============================================================ */
+function buscarGlobal(query) {
+  const q = normalizarTexto((query || '').trim());
+  if (!q) return { pedidos: [], ingredientes: [], notas: [], clientes: [] };
+  return {
+    pedidos: state.pedidos.filter(p =>
+      normalizarTexto(p.cliente || '').includes(q) || normalizarTexto(p.producto || '').includes(q)
+    ).slice(0, 6),
+    ingredientes: state.ingredientes.filter(i =>
+      normalizarTexto(i.nombre || '').includes(q)
+    ).slice(0, 6),
+    notas: state.notas.filter(n =>
+      normalizarTexto(n.texto || '').includes(q)
+    ).slice(0, 6),
+    clientes: getClientes().filter(c =>
+      normalizarTexto(c.nombre || '').includes(q)
+    ).slice(0, 6),
+  };
+}
+
+let _busquedaGlobalTimer = null;
+
+function abrirBusquedaGlobal() {
+  openModal(`
+    <div class="modal-title">🔍 Buscar en todo</div>
+    <div class="form-group">
+      <input class="form-input" id="busqueda-global-input" type="text"
+        placeholder="Cliente, producto, ingrediente, nota..." autocomplete="off"
+        oninput="handleBusquedaGlobalInput(this.value)">
+    </div>
+    <div id="busqueda-global-resultados"></div>
+  `);
+}
+
+// Debounce ~200ms para no recalcular en cada tecla
+function handleBusquedaGlobalInput(value) {
+  clearTimeout(_busquedaGlobalTimer);
+  _busquedaGlobalTimer = setTimeout(() => renderBusquedaGlobalResultados(value), 200);
+}
+
+function renderBusquedaGlobalResultados(value) {
+  const el = document.getElementById('busqueda-global-resultados');
+  if (!el) return; // el modal se cerró mientras corría el debounce
+  const q = (value || '').trim();
+  if (!q) { el.innerHTML = ''; return; }
+
+  const { pedidos, ingredientes, notas, clientes } = buscarGlobal(q);
+  const total = pedidos.length + ingredientes.length + notas.length + clientes.length;
+
+  if (!total) {
+    el.innerHTML = `<div class="empty-state" style="padding:16px 0"><p>Sin resultados para "${esc(q)}"</p></div>`;
+    return;
+  }
+
+  const seccion = (titulo, items, render) => !items.length ? '' : `
+    <div style="margin-top:14px">
+      <div class="text-sm text-muted" style="font-weight:700;margin-bottom:6px">${titulo}</div>
+      <div class="activity-list">${items.map(render).join('')}</div>
+    </div>`;
+
+  el.innerHTML = `
+    ${seccion('👤 Clientes', clientes, c => `
+      <div class="activity-item" style="cursor:pointer" onclick="openClienteDetalle('${c.key.replace(/'/g, "\\'")}')">
+        <span class="activity-icon act-icon-act-blue"><i data-lucide="user"></i></span>
+        <div class="activity-body">
+          <div class="activity-title">${esc(c.nombre)}</div>
+          <div class="activity-sub">${c.pedidos.length} pedido${c.pedidos.length !== 1 ? 's' : ''} · ${fmt(c.totalGastado)}</div>
+        </div>
+      </div>
+    `)}
+    ${seccion('📦 Pedidos', pedidos, p => `
+      <div class="activity-item" style="cursor:pointer" onclick="openPedidoDetalle(${p.id})">
+        <span class="activity-icon act-icon-${p.estado === 'done' ? 'act-green' : 'act-blue'}"><i data-lucide="shopping-bag"></i></span>
+        <div class="activity-body">
+          <div class="activity-title">${esc(p.producto)} - ${esc(p.cliente)}</div>
+          <div class="activity-sub">${fmtDate(p.fechaEntrega)} · ${estadoLabel(p.estado)}</div>
+        </div>
+      </div>
+    `)}
+    ${seccion('🧂 Ingredientes', ingredientes, i => `
+      <div class="activity-item" style="cursor:pointer" onclick="openIngredienteForm(${i.id})">
+        <span class="activity-icon act-icon-act-orange"><i data-lucide="package"></i></span>
+        <div class="activity-body">
+          <div class="activity-title">${esc(i.nombre)}</div>
+          <div class="activity-sub">Stock: ${i.stock} ${esc(i.unidad || '')}</div>
+        </div>
+      </div>
+    `)}
+    ${seccion('📝 Notas', notas, n => `
+      <div class="activity-item" style="cursor:pointer" onclick="openNotaForm(${n.id})">
+        <span class="activity-icon act-icon-act-yellow"><i data-lucide="notebook-pen"></i></span>
+        <div class="activity-body">
+          <div class="activity-title">${esc((n.texto || '').slice(0, 60))}${(n.texto || '').length > 60 ? '…' : ''}</div>
+          <div class="activity-sub">${fmtDate(n.fecha)}</div>
+        </div>
+      </div>
+    `)}
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
 function renderInicio() {
   const el = document.getElementById('screen-inicio');
   const now = new Date();
@@ -2565,7 +2724,7 @@ function renderInicio() {
   const cambio = cambioHoy();
   const cambioClass = cambio > 0 ? 'pos' : cambio < 0 ? 'neg' : 'neu';
   const cambioStr = cambio > 0 ? '+' + fmt(cambio) : cambio < 0 ? fmt(cambio) : '$0';
-  const actividad = actividadReciente(6);
+  const actividad = pedidosEntregadosRecientes(5);
   const tips = [
     'Llevá tu stock siempre al día para que no falte nada en tus recetas.',
     'Registrá cada venta apenas la hagas: así el saldo siempre está al día.',
@@ -2576,7 +2735,7 @@ function renderInicio() {
   const tipDelDia = tips[new Date().getDate() % tips.length];
 
   el.innerHTML = `
-    <div class="dash-greeting">¡Hola SofiJuan! 👋</div>
+    <div class="dash-greeting">¡Hola! 👋</div>
     <div class="dash-date">${fechaLarga}</div>
     ${renderNotifBanner()}
     ${renderAtrasadosBanner()}
@@ -2623,26 +2782,28 @@ function renderInicio() {
       </div>
     </div>
 
+    ${renderEntregasHoyCard()}
+
     <!-- ACTIVIDAD RECIENTE -->
     <div class="card anim-in" style="animation-delay:.18s">
       <div class="card-header">
         <div class="card-title"><span class="card-icon"><i data-lucide="history"></i></span> Actividad reciente</div>
-        <button class="btn btn-ghost btn-sm" onclick="navigate('finanzas')">Ver todo</button>
+        <button class="btn btn-ghost btn-sm" onclick="verEntregadosDesdeInicio()">Ver más</button>
       </div>
       ${actividad.length ? `
         <div class="activity-list">
-          ${actividad.map(a => `
-            <div class="activity-item">
-              <span class="activity-icon act-icon-${a.cls}"><i data-lucide="${a.icon}"></i></span>
+          ${actividad.map(p => `
+            <div class="activity-item" style="cursor:pointer" onclick="openPedidoDetalle(${p.id})">
+              <span class="activity-icon act-icon-act-green"><i data-lucide="package-check"></i></span>
               <div class="activity-body">
-                <div class="activity-title">${a.title}</div>
-                <div class="activity-sub">${a.sub}</div>
+                <div class="activity-title">Pedido entregado</div>
+                <div class="activity-sub">${esc(p.producto)} - ${esc(p.cliente)} · ${fmt(p.precio)}</div>
               </div>
-              <div class="activity-date">${fmtActividadFecha(a)}</div>
+              <div class="activity-date">${fmtActividadFecha({ fecha: p.fechaEntrega, ts: p._ts || null })}</div>
             </div>
           `).join('')}
         </div>
-      ` : `<div class="empty-state" style="padding:16px 0"><p>Todavía no hay actividad registrada</p></div>`}
+      ` : `<div class="empty-state" style="padding:16px 0"><p>Todavía no hay pedidos entregados</p></div>`}
     </div>
 
     <!-- TIP DEL DÍA -->
@@ -9535,7 +9696,12 @@ async function actualizarApp() {
   } catch(e) {
     console.warn('[App] Error al actualizar:', e);
   } finally {
-    location.reload();
+    // location.reload() puede traer el index.html desde el caché HTTP del
+    // navegador (no el Cache API, que ya limpiamos arriba), reapareciendo
+    // el mismo APP_VERSION viejo y con él el cartel de "hay una versión
+    // nueva". Forzamos una URL única para que el navegador pida el archivo
+    // sí o sí a la red.
+    location.href = location.pathname + '?v=' + Date.now();
   }
 }
 

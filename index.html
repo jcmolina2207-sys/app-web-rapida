@@ -5459,12 +5459,21 @@ function savePedidoConfirmado(id) {
       state.pedidos[idx] = { ...pedidoAnterior, ...data, stockDescontado, stockDetalle };
       const ingresoAuto = generarIngresoAutoSiEntregado(state.pedidos[idx]);
       // Si el pedido ya estaba Entregado (el ingreso auto ya existía), igual
-      // sincronizamos el método de pago por si lo cambiaron en la edición.
+      // sincronizamos los datos por si los cambiaron en la edición (fecha,
+      // monto, producto/cliente, método de pago). Antes solo se sincronizaba
+      // el método de pago: si editabas la fecha de entrega o el precio de un
+      // pedido ya entregado, el ingreso en Finanzas quedaba con los datos
+      // viejos, apareciendo en el día equivocado dentro de "Finanzas > Por día".
       if (!ingresoAuto) {
         const movExistente = state.movimientos.find(m => m.auto && m.pedidoId === state.pedidos[idx].id);
-        if (movExistente && movExistente.metodoPago !== data.metodoPago) {
-          movExistente.metodoPago = data.metodoPago;
-          persistItem('movimientos', movExistente);
+        if (movExistente) {
+          let cambio = false;
+          if (movExistente.metodoPago !== data.metodoPago) { movExistente.metodoPago = data.metodoPago; cambio = true; }
+          if (movExistente.fecha !== data.fechaEntrega) { movExistente.fecha = data.fechaEntrega; cambio = true; }
+          if (movExistente.monto !== data.precio) { movExistente.monto = data.precio; cambio = true; }
+          const descNueva = `${data.producto} - ${data.cliente}`;
+          if (movExistente.descripcion !== descNueva) { movExistente.descripcion = descNueva; cambio = true; }
+          if (cambio) persistItem('movimientos', movExistente);
         }
       }
       persistItem('pedidos', state.pedidos[idx]);

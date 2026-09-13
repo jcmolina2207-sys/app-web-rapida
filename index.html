@@ -1381,7 +1381,7 @@ const messaging = firebase.messaging.isSupported() ? firebase.messaging() : null
 
 // ---- Versión de la app (para detectar actualizaciones) ----
 // Al publicar un cambio: subir este número Y el de version.json, IGUALES.
-const APP_VERSION = '2026.09.10.1';
+const APP_VERSION = '2026.09.13.1';
 
 /* ============================================================
    ESTADO GLOBAL + SINCRONIZACIÓN FIREBASE
@@ -1765,7 +1765,7 @@ async function loadFromFirebase() {
   renderInicio();
   setInterval(updateHeaderDate, 30000);
 
-  // Luego intentar Firebase con timeout de 5 segundos
+  // Luego intentar Firebase con timeout de 10 segundos
   const firebasePromise = (async () => {
     const results = await Promise.all(
       SYNCED_COLLECTIONS.map(c => db.collection(c).get())
@@ -1797,7 +1797,7 @@ async function loadFromFirebase() {
     // Antes se hacía `state.nextId = metaDoc.data().nextId`, lo cual podía
     // PISAR HACIA ATRÁS el nextId local si el usuario ya había creado
     // pedidos (avanzando state.nextId en memoria) mientras esta carga desde
-    // Firestore todavía estaba en vuelo (recordar: el timeout de 5s solo
+    // Firestore todavía estaba en vuelo (recordar: el timeout de 10s solo
     // corta el `await`, esta promesa sigue corriendo en segundo plano y
     // pisa state.nextId igual cuando por fin resuelve). Si nextId retrocedía,
     // el próximo pedido nuevo reusaba un id ya asignado a un pedido recién
@@ -1831,7 +1831,7 @@ async function loadFromFirebase() {
   })();
 
   const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error('timeout')), 5000)
+    setTimeout(() => reject(new Error('timeout')), 10000)
   );
 
   try {
@@ -1841,6 +1841,21 @@ async function loadFromFirebase() {
     setSyncStatus('error');
   }
 }
+
+// El timeout de arriba solo cubre la carga INICIAL. Si en algún momento el
+// dispositivo pierde/recupera la red (wifi que corta, entrar a un túnel,
+// modo avión, etc.), sin esto el indicador se quedaba pegado en "Sin
+// conexión" hasta el próximo F5, aunque la señal ya hubiera vuelto: los
+// onSnapshot de setupRealtimeSync() reintentan solos pero pueden tardar por
+// el backoff propio del SDK. 'online' fuerza una recarga puntual (get(), no
+// vuelve a crear listeners) para salir del error apenas hay señal; 'offline'
+// refleja el corte al toque en vez de esperar a que algo falle más tarde.
+window.addEventListener('online', () => {
+  loadFromFirebase();
+});
+window.addEventListener('offline', () => {
+  setSyncStatus('error');
+});
 
 // Siembra los datos de costos que pasó Sofía (una sola vez, no duplica)
 function seedDatosSofia() {

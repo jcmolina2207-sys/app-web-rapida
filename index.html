@@ -1381,7 +1381,7 @@ const messaging = firebase.messaging.isSupported() ? firebase.messaging() : null
 
 // ---- Versión de la app (para detectar actualizaciones) ----
 // Al publicar un cambio: subir este número Y el de version.json, IGUALES.
-const APP_VERSION = '2026.09.13.1';
+const APP_VERSION = '2026.09.15.1';
 
 /* ============================================================
    ESTADO GLOBAL + SINCRONIZACIÓN FIREBASE
@@ -1838,7 +1838,14 @@ async function loadFromFirebase() {
     await Promise.race([firebasePromise, timeoutPromise]);
   } catch(e) {
     console.warn('Firebase no disponible, usando datos locales:', e.message);
-    setSyncStatus('error');
+    // La carga inicial (auth + SW + 8 colecciones) a veces tarda más de
+    // 10s en frío sin que haya ningún problema real de red: firebasePromise
+    // sigue corriendo en segundo plano y llama a setSyncStatus('ok') apenas
+    // resuelve (más abajo) o lo hace el primer onSnapshot de
+    // setupRealtimeSync(). Mostrar "Sin conexión" en ese momento es un
+    // falso positivo que asusta a Sofía sin motivo. Solo es un problema de
+    // red real si el navegador mismo lo reporta (navigator.onLine).
+    setSyncStatus(navigator.onLine ? 'connecting' : 'error');
   }
 }
 

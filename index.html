@@ -1381,7 +1381,7 @@ const messaging = firebase.messaging.isSupported() ? firebase.messaging() : null
 
 // ---- Versión de la app (para detectar actualizaciones) ----
 // Al publicar un cambio: subir este número Y el de version.json, IGUALES.
-const APP_VERSION = '2026.09.15.1';
+const APP_VERSION = '2026.09.15.2';
 
 /* ============================================================
    ESTADO GLOBAL + SINCRONIZACIÓN FIREBASE
@@ -1767,7 +1767,13 @@ async function loadFromFirebase() {
 
   // Luego intentar Firebase con timeout de 10 segundos
   const firebasePromise = (async () => {
-    const results = await Promise.all(
+    // Promise.allSettled en vez de Promise.all: si a UNA colección le falta
+    // permiso en las reglas de Firestore (pasó con historialPrecios), antes
+    // eso rechazaba la promesa entera y ninguna colección sincronizaba
+    // -pedidos, ingredientes, todo- aunque el resto estuviera perfecto. Ahora
+    // esa colección puntual se salta (sigue con su copia local) y las demás
+    // cargan igual.
+    const results = await Promise.allSettled(
       SYNCED_COLLECTIONS.map(c => db.collection(c).get())
     );
     const metaDoc = await db.collection('app').doc('meta').get();
@@ -1779,8 +1785,12 @@ async function loadFromFirebase() {
     }
 
     SYNCED_COLLECTIONS.forEach((c, i) => {
+      if (results[i].status !== 'fulfilled') {
+        console.warn(`[Sync] "${c}" no cargó desde Firestore (queda con datos locales):`, results[i].reason && results[i].reason.message);
+        return;
+      }
       const { merged, aRepushear, aBorrarEnRemoto } = mergeCollection(
-        c, state[c], results[i].docs, (state.tombstones || {})[c]
+        c, state[c], results[i].value.docs, (state.tombstones || {})[c]
       );
       state[c] = merged;
       if (c === 'pedidos') state.pedidos.forEach(normalizarPedido);
@@ -1971,7 +1981,15 @@ function setupRealtimeSync() {
       setSyncStatus('ok');
     }, err => {
       console.error(`Error de sync en ${colName}`, err);
-      setSyncStatus('error');
+      // "permission-denied" es un problema de reglas de Firestore para ESA
+      // colección puntual (ej: se agregó una colección nueva y las reglas no
+      // se actualizaron) — no significa que el dispositivo esté sin conexión,
+      // y las demás colecciones pueden estar sincronizando bien. Pintar todo
+      // de rojo por eso confunde. Solo los errores de conectividad real
+      // (unavailable, deadline-exceeded, etc.) marcan "Sin conexión".
+      if (err.code !== 'permission-denied') {
+        setSyncStatus('error');
+      }
     });
   });
 }
